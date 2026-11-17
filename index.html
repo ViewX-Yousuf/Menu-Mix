@@ -507,26 +507,24 @@ tbody tr:last-child td{border-bottom:0}
 
 <!-- COMPARISON VIEW (Local Filters) -->
 <section class="view" id="view-compare">
-  <div class="filters" style="--cols:5">
+  <div class="filters" style="--cols:4">
     <div class="filters-head">
       <div>
         <div class="filters-title">Comparison settings</div>
-        <div class="filters-note">Period A and B each take a year and month. The From/To day range applies to both (leave empty for whole months). Change % = (B − A) ÷ A.</div>
+        <div class="filters-note">Pick a From and To date for Period A and for Period B (any range, e.g. 1–15 Oct vs 1–15 Nov). An empty date means no limit on that side. Change % = (B − A) ÷ A.</div>
       </div>
       <div class="head-right">
         <div class="actions-slot"></div>
         <button class="btn sm primary" id="compareBtn">Run Comparison</button>
       </div>
     </div>
+    <div class="filter period-a"><label>Period A · From date</label><input id="aFrom" type="date"></div>
+    <div class="filter period-a"><label>Period A · To date</label><input id="aTo" type="date"></div>
+    <div class="filter period-b"><label>Period B · From date</label><input id="bFrom" type="date"></div>
+    <div class="filter period-b"><label>Period B · To date</label><input id="bTo" type="date"></div>
     <div class="filter"><label>Compare by</label><select id="compareBy"><option value="__category">Category</option><option value="__sub">Sub Category</option><option value="__size">Size</option><option value="__manager">Area Manager</option><option value="__store">Store</option><option value="__product">Product</option></select></div>
     <div class="filter"><label>Area Manager</label><div class="ms-container" id="ms-cfAM"></div></div>
     <div class="filter"><label>Store code</label><div class="ms-container" id="ms-cfStore"></div></div>
-    <div class="filter"><label>From (day)</label><input id="cFrom" type="number" min="1" max="31" step="1" placeholder="1"></div>
-    <div class="filter"><label>To (day)</label><input id="cTo" type="number" min="1" max="31" step="1" placeholder="31"></div>
-    <div class="filter period-a"><label>Period A · Year</label><div class="ms-container" id="ms-aYear"></div></div>
-    <div class="filter period-a"><label>Period A · Month</label><div class="ms-container" id="ms-aMonth"></div></div>
-    <div class="filter period-b"><label>Period B · Year</label><div class="ms-container" id="ms-bYear"></div></div>
-    <div class="filter period-b"><label>Period B · Month</label><div class="ms-container" id="ms-bMonth"></div></div>
   </div>
 
   <div class="kpis">
@@ -1053,9 +1051,9 @@ function switchSizeGroup(group){
 /* =========================================
    CASCADING FILTER & DROPDOWN LOGIC
    ========================================= */
-const MS_IDS=['fAM','fStore','fCategory','fSub','fSize','fProduct','fYear','fMonth','sfAM','sfStore','sfYear','sfMonth','cfAM','cfStore','aYear','aMonth','bYear','bMonth'];
+const MS_IDS=['fAM','fStore','fCategory','fSub','fSize','fProduct','fYear','fMonth','sfAM','sfStore','sfYear','sfMonth','cfAM','cfStore'];
 const MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
-const COMPARE_IDS=['cfAM','cfStore','aYear','aMonth','bYear','bMonth'];
+const COMPARE_IDS=['cfAM','cfStore'];
 /* Date filter = selected years + selected months + day-of-month range (From/To boxes) */
 function dateFilter(prefix,dayPrefix=prefix){
   const ys=getSelectedMulti(prefix+'Year').map(Number),ms=getSelectedMulti(prefix+'Month').map(l=>MONTHS.indexOf(l)+1);
@@ -1118,8 +1116,11 @@ function populateFilters(){
   populateMultiSelect('sfAM',idx.managers,false); populateMultiSelect('sfStore',idx.stores,false);
   populateMultiSelect('cfAM',idx.managers,false); populateMultiSelect('cfStore',idx.storeCodes.values(),false);
   const years=[...idx.years].sort((a,b)=>a-b).map(String),months=[...idx.months].sort((a,b)=>a-b).map(m=>MONTHS[m-1]);
-  ['f','sf','a','b'].forEach(p=>{populateMultiSelect(p+'Year',years,false,true);populateMultiSelect(p+'Month',months,false,true)});
-  ['f','sf','c'].forEach(p=>{$(p+'From').value='';$(p+'To').value=''});
+  ['f','sf'].forEach(p=>{populateMultiSelect(p+'Year',years,false,true);populateMultiSelect(p+'Month',months,false,true)});
+  ['f','sf'].forEach(p=>{$(p+'From').value='';$(p+'To').value=''});
+  // Comparison date pickers: limited to the dates present in the data
+  const dMin=idx.dateList[0]||'',dMax=idx.dateList[idx.dateList.length-1]||'';
+  ['aFrom','aTo','bFrom','bTo'].forEach(id=>{const el=$(id);el.value='';el.min=dMin;el.max=dMax});
 }
 
 function onFilterChange(changedId){
@@ -1157,7 +1158,7 @@ function onFilterChange(changedId){
 
 const toSet=arr=>arr.length?new Set(arr):null;
 ['fFrom','fTo','sfFrom','sfTo'].forEach(id=>$(id).addEventListener('input',debounce(()=>applyFilters(id),250)));
-['cFrom','cTo'].forEach(id=>$(id).addEventListener('input',debounce(()=>{markDirty('compare');renderActive()},250)));
+['aFrom','aTo','bFrom','bTo'].forEach(id=>$(id).addEventListener('change',()=>{markDirty('compare');renderActive()}));
 
 function applyFilters(changedId){
   if(!rawRows.length)return;
@@ -1395,9 +1396,17 @@ function renderSizes(){
 function initComparisonDates(){
   // default: previous month (A) vs latest month (B)
   const yms=[...new Set(idx.dateList.map(d=>d.slice(0,7)))];if(!yms.length)return;
-  const pick=(p,ym)=>{setSelectedMulti(p+'Year',[ym.slice(0,4)]);setSelectedMulti(p+'Month',[MONTHS[+ym.slice(5,7)-1]])};
+  const pick=(p,ym)=>{const ds=idx.dateList.filter(d=>d.startsWith(ym));$(p+'From').value=ds[0];$(p+'To').value=ds[ds.length-1]};
   pick('a',yms[Math.max(0,yms.length-2)]);pick('b',yms[yms.length-1]);
 }
+// Period date range from its From/To pickers (YYYY-MM-DD strings compare correctly as text)
+function periodRange(p){
+  let from=$(p+'From').value,to=$(p+'To').value;
+  if(from&&to&&from>to)[from,to]=[to,from];
+  return {from,to,test:r=>!!r.__date&&(!from||r.__date>=from)&&(!to||r.__date<=to)};
+}
+const fmtDate=d=>d?new Date(d+'T00:00').toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}):'…';
+const rangeText=g=>!g.from&&!g.to?'All dates':`${fmtDate(g.from)} – ${fmtDate(g.to)}`;
 
 /* Shared comparison engine: one pass over the data for both periods and the breakdown */
 const pctChange=(x,y)=>x?((y-x)/Math.abs(x))*100:(y?100:0);
@@ -1405,7 +1414,7 @@ function compareCompute(pred,key,fA,fB){
   const m=new Map(),aa={qty:0,sales:0},bb={qty:0,sales:0};
   for(let i=0;i<rawRows.length;i++){const r=rawRows[i];if(!r.__y)continue;
     if(pred&&!pred(r))continue;
-    const inA=dateOK(r,fA),inB=dateOK(r,fB);
+    const inA=fA(r),inB=fB(r);
     if(!inA&&!inB)continue;
     const name=String(r[key]||'Unmapped');let x=m.get(name);
     if(!x)m.set(name,x={name,aq:0,bq:0,as:0,bs:0});
@@ -1417,14 +1426,16 @@ const COMPARE_COLS=[{k:'name'},{k:'aq',num:true},{k:'bq',num:true},{num:true,v:r
 
 function runComparison(){
   if(!rawRows.length)return;
-  // one From/To day range, applied to both periods
+  // each period has its own From/To date range
   const fAms=toSet(getSelectedMulti('cfAM')),labels=getSelectedMulti('cfStore'),fStores=labels.length?new Set(labels.map(l=>idx.codeByLabel.get(l))):null;
   const pred=(fAms||fStores)?r=>(!fAms||fAms.has(r.__manager))&&(!fStores||fStores.has(r.__storeId)):null;
-  const {aa,bb,results}=compareCompute(pred,$('compareBy').value,dateFilter('a','c'),dateFilter('b','c'));
+  const ga=periodRange('a'),gb=periodRange('b');
+  const {aa,bb,results}=compareCompute(pred,$('compareBy').value,ga.test,gb.test);
   $('aSales').textContent=money(aa.sales);$('bSales').textContent=money(bb.sales);
+  $('aSales').nextElementSibling.textContent=rangeText(ga);$('bSales').nextElementSibling.textContent=rangeText(gb);
   $('salesChange').textContent=pct(pctChange(aa.sales,bb.sales));$('qtyChange').textContent=pct(pctChange(aa.qty,bb.qty));
   const top=results.slice(0,20);
-  setChart('compareChart','bar',top.map(x=>x.name),[{label:'Period A sales',data:top.map(x=>x.as),backgroundColor:'#3267e9'},{label:'Period B sales',data:top.map(x=>x.bs),backgroundColor:'#18a88b'}]);
+  setChart('compareChart','bar',top.map(x=>x.name),[{label:`Period A sales (${rangeText(ga)})`,data:top.map(x=>x.as),backgroundColor:'#3267e9'},{label:`Period B sales (${rangeText(gb)})`,data:top.map(x=>x.bs),backgroundColor:'#18a88b'}]);
   tableRows('compareRows',results,COMPARE_COLS);
 }
 $('compareBtn').addEventListener('click',runComparison);
