@@ -321,6 +321,7 @@ tbody.drillable tr:hover td{background:#e3edff}
   </nav>
   <div class="userbox hidden" id="userBox">
     <div class="who"><b id="userName"></b><small id="userRole"></small></div>
+    <button type="button" class="btn sm secondary hidden" id="delMonthBtn" title="Delete one month of Menu Mix sales from the database (admins only)">🗑 Delete month</button>
     <button type="button" class="btn sm secondary" id="pwChangeBtn">Change password</button>
     <button type="button" class="btn sm secondary" id="signOutBtn">Sign out</button>
   </div>
@@ -601,6 +602,20 @@ tbody.drillable tr:hover td{background:#e3edff}
     <div class="toolbar" style="justify-content:flex-end;margin:14px 0 0">
       <button type="button" class="btn secondary" id="cpCancel">Cancel</button>
       <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</div>
+<!-- ADMIN: DELETE ONE MONTH OF MENU MIX SALES -->
+<div class="pw-overlay hidden" id="delModal">
+  <form class="pw-box" id="delForm">
+    <h3>🗑 Delete a month of Menu Mix data</h3>
+    <p class="note">This permanently removes the month's sales from the database for everyone. It cannot be undone. Remove the same month from the Menu Mix file in storage too, or the next upload will add it back.</p>
+    <select id="delMonth" style="width:100%;height:38px;border:1px solid var(--line);border-radius:8px;padding:0 10px;margin-bottom:8px;font-size:13px"></select>
+    <input type="text" id="delConfirm" placeholder="Type DELETE to confirm" autocomplete="off">
+    <div class="pw-err" id="delErr"></div>
+    <div class="toolbar" style="justify-content:flex-end;margin:14px 0 0">
+      <button type="button" class="btn secondary" id="delCancel">Cancel</button>
+      <button type="submit" class="btn primary" id="delGo" style="background:#c14444">Delete month</button>
     </div>
   </form>
 </div>
@@ -1180,6 +1195,7 @@ function showUser(){
   $('userBox').title=ME.email;
   // Passwords belong to the Sales dashboard now; inside it, signing out is done there too
   $('pwChangeBtn').classList.add('hidden');if(SHARED)$('signOutBtn').classList.add('hidden');
+  $('delMonthBtn').classList.toggle('hidden',ME.role!=='admin');
 }
 $('loginForm').addEventListener('submit',async e=>{
   e.preventDefault();const btn=$('loginBtn');btn.disabled=true;$('loginErr').textContent='';
@@ -1208,6 +1224,29 @@ $('cpForm').addEventListener('submit',async e=>{
   try{const {error}=await sb().auth.updateUser({password:a});if(error)throw error;
     $('cpNew').value='';$('cpNew2').value='';$('cpModal').classList.add('hidden');alert('Password changed.')}
   catch(err){$('cpErr').textContent='Could not change it: '+errText(err)}
+});
+/* ADMIN: delete one month of Menu Mix sales (mm_delete_month checks the admin role in the database) */
+$('delMonthBtn').addEventListener('click',async()=>{
+  const sel=$('delMonth');$('delConfirm').value='';$('delErr').textContent='';$('delErr').style.color='';$('delGo').disabled=false;
+  sel.innerHTML=AVAIL.length?[...AVAIL].reverse().map(ym=>`<option value="${ym}">${ymLabel(ym)}</option>`).join(''):'<option value="">No months in the database</option>';
+  $('delModal').classList.remove('hidden');
+  try{ // row counts per month, when available
+    const {data,error}=await sb().rpc('mm_day_sums');
+    if(!error&&Array.isArray(data)){const n=new Map();data.forEach(x=>{const ym=String(x[0]).slice(0,7);n.set(ym,(n.get(ym)||0)+(+x[1]||0))});
+      [...sel.options].forEach(o=>{if(n.has(o.value))o.textContent=`${ymLabel(o.value)} — ${fmt(n.get(o.value))} rows`})}
+  }catch(e){}
+});
+$('delCancel').addEventListener('click',()=>$('delModal').classList.add('hidden'));
+$('delForm').addEventListener('submit',async e=>{
+  e.preventDefault();const ym=$('delMonth').value,err=$('delErr');if(!ym)return;
+  if($('delConfirm').value.trim().toUpperCase()!=='DELETE'){err.style.color='';err.textContent='Type DELETE to confirm.';return}
+  const btn=$('delGo');btn.disabled=true;err.style.color='';err.textContent=`Deleting ${ymLabel(ym)}…`;
+  try{
+    const {data,error}=await sb().rpc('mm_delete_month',{p_ym:ym});if(error)throw error;
+    await deleteFromDB(CACHE_KEY);
+    err.style.color='#11866d';err.textContent=`Deleted ${fmt(data&&data.deleted)} rows of ${ymLabel(ym)}. Reloading…`;
+    setTimeout(()=>location.reload(),1500);
+  }catch(x){err.style.color='';err.textContent='Could not delete: '+errText(x);btn.disabled=false}
 });
 async function authBoot(){
   if(SHARED){startAuthed();return} // inside the Sales dashboard: its sign-in is used, no login form
