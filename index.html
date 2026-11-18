@@ -1026,40 +1026,103 @@ async function adminSync(status){
   }
 }
 
-/* EVERYONE: read this person's data from the database */
+/* EVERYONE: read this person's data from the database.
+   Only the latest INITIAL_MONTHS months load at sign-in; any other month loads when it is picked
+   in a Year / Month filter, a Comparison date or the 2-month popup (see ensureMonths). */
+const INITIAL_MONTHS=2;
+let AVAIL=[],LOADED=new Set(),refVer='',monthLoading=null,lastMsg={msg:'',warn:false};
+const ymShort=ym=>`${MONTHS[+ym.slice(5,7)-1].slice(0,3)} ${ym.slice(0,4)}`;
+const loadedText=()=>{const l=AVAIL.filter(ym=>LOADED.has(ym));return !l.length?'':l.length===AVAIL.length?'all months':l.length<=3?l.map(ymShort).join(', '):`${l.length} of ${AVAIL.length} months`};
+async function loadRef(c){
+  if(refReady()&&ref.category.updated===refVer)return;
+  const {data:rf,error}=await c.rpc('mm_reference');if(error)throw error;
+  const clean=r=>r.map(v=>v==null?'':String(v));
+  ref.category=rf&&rf.category.length?{rows:rf.category.map(r=>{r=clean(r);r[3]=r[3].trim()||'Unmapped';return r}),name:'Supabase',updated:refVer}:null;
+  ref.allocation=rf&&rf.allocation.length?{rows:rf.allocation.map(clean),name:'Supabase',updated:refVer}:null;
+  if(!ref.category)throw Error('the Category mapping is not in the database yet'+(ME.role==='admin'?' (put Category.xlsx in the bucket)':' — ask the admin'));
+  if(!ref.allocation)throw Error(ME.all?'the Store allocation is not in the database yet':'none of your stores are in the Store allocation — ask the admin');
+}
+async function fetchMonthRecs(c,ym){
+  const {data,error}=await c.rpc('mm_sales_month',{p_ym:ym});if(error)throw Error(`${ym}: ${error.message}`);
+  const S=data.stores||{},I=data.items||{},rows=data.rows||[],out=new Array(rows.length);
+  for(let i=0;i<rows.length;i++){const [d,sid,it,q,a]=rows[i],nm=I[it]||'';
+    out[i]={item:String(it),storeId:String(sid),storeName:S[sid]||'',date:`${ym}-${String(d).padStart(2,'0')}`,qty:+q||0,sales:+a||0,name:nm,long:nm}}
+  return out;
+}
+async function fetchMonths(c,list,onDone){
+  const recs=[];let next=0,done=0;
+  await Promise.all([0,1,2].map(async()=>{while(next<list.length){const r=await fetchMonthRecs(c,list[next++]);for(let i=0;i<r.length;i++)recs.push(r[i]);done++;if(onDone)onDone(done)}}));
+  return recs;
+}
+function saveRowCache(){
+  setTimeout(()=>saveToDB(CACHE_KEY,{v:CACHE_VERSION,sig:refSig(),menuSig,rows:rawRows,msg:lastMsg.msg,warn:lastMsg.warn,loaded:[...LOADED]}).catch(err=>console.warn('Row cache not saved',err)),300);
+}
+// tick the loaded months in the Year / Month filters (main dashboard and Size Mix)
+function presetLoadedMonths(){
+  const l=AVAIL.filter(ym=>LOADED.has(ym));if(!l.length||l.length===AVAIL.length)return;
+  const ys=[...new Set(l.map(ym=>ym.slice(0,4)))],ms=[...new Set(l.map(ym=>MONTHS[+ym.slice(5,7)-1]))];
+  ['f','sf'].forEach(p=>{setSelectedMulti(p+'Year',ys);setSelectedMulti(p+'Month',ms)});
+  applyFilters();
+}
 async function loadMyData(status,parsed){
   const c=sb();
   const {data:ver,error:e1}=await c.rpc('mm_version');if(e1)throw e1;
   const salesV=String(ver.sales_version),refV=String(ver.ref_version),userKey=ME.email+'|'+ME.role+'|'+(ME.stores||[]).join(';');
-  const doneText=`Menu Mix loaded • data updated ${new Date(ver.sales_version).toLocaleString()}`;
   const sig=`${salesV}|${refV}|${userKey}`;
-  if(rawRows.length&&menuSig===sig)return doneText;                                                 // already showing this
+  refVer=refV;AVAIL=[...(ver.months||[])].map(String).sort();
+  const doneText=()=>`Menu Mix loaded • showing ${loadedText()} • data updated ${new Date(ver.sales_version).toLocaleString()}`;
+  if(rawRows.length&&menuSig===sig)return doneText();                                               // already showing this
   if(parsed&&parsed.v===CACHE_VERSION&&parsed.menuSig===sig&&parsed.rows&&parsed.rows.length){        // same data, same person
-    rawRows=parsed.rows;menuSig=sig;finishBuild(parsed.msg,parsed.warn);return doneText}
-  const {data:rf,error:e2}=await c.rpc('mm_reference');if(e2)throw e2;
-  const clean=r=>r.map(v=>v==null?'':String(v));
-  ref.category=rf&&rf.category.length?{rows:rf.category.map(r=>{r=clean(r);r[3]=r[3].trim()||'Unmapped';return r}),name:'Supabase',updated:refV}:null;
-  ref.allocation=rf&&rf.allocation.length?{rows:rf.allocation.map(clean),name:'Supabase',updated:refV}:null;
-  if(!ref.category)throw Error('the Category mapping is not in the database yet'+(ME.role==='admin'?' (put Category.xlsx in the bucket)':' — ask the admin'));
-  if(!ref.allocation)throw Error(ME.all?'the Store allocation is not in the database yet':'none of your stores are in the Store allocation — ask the admin');
-  const months=ver.months||[];
-  if(!months.length)throw Error(ME.all||(ME.stores||[]).length?'there is no Menu Mix data for your stores yet':'no stores are assigned to your account yet — ask the admin');
-  const recs=[];let done=0,next=0;
-  status('loading',`Loading 0/${months.length} months`);
-  const fetchMonth=async ym=>{
-    const {data,error}=await c.rpc('mm_sales_month',{p_ym:ym});if(error)throw Error(`${ym}: ${error.message}`);
-    const S=data.stores||{},I=data.items||{},rows=data.rows||[];
-    for(let i=0;i<rows.length;i++){const [d,sid,it,q,a]=rows[i],nm=I[it]||'';
-      recs.push({item:String(it),storeId:String(sid),storeName:S[sid]||'',date:`${ym}-${String(d).padStart(2,'0')}`,qty:+q||0,sales:+a||0,name:nm,long:nm})}
-    done++;status('loading',`Loading ${done}/${months.length} months`);
-  };
-  await Promise.all([0,1,2].map(async()=>{while(next<months.length)await fetchMonth(months[next++])}));
+    LOADED=new Set(parsed.loaded||AVAIL);lastMsg={msg:parsed.msg,warn:parsed.warn};
+    rawRows=parsed.rows;menuSig=sig;finishBuild(parsed.msg,parsed.warn);presetLoadedMonths();return doneText()}
+  await loadRef(c);
+  if(!AVAIL.length)throw Error(ME.all||(ME.stores||[]).length?'there is no Menu Mix data for your stores yet':'no stores are assigned to your account yet — ask the admin');
+  const first=AVAIL.slice(-INITIAL_MONTHS);
+  status('loading',`Loading ${first.map(ymShort).join(' and ')}`);
+  const recs=await fetchMonths(c,first);
   status('loading','Processing…');await tick(30);
   const {rows,msg,warn}=joinRecords(recs);
-  rawRows=rows;menuSig=sig;finishBuild(msg,warn);
-  setTimeout(()=>saveToDB(CACHE_KEY,{v:CACHE_VERSION,sig:refSig(),menuSig:sig,rows:rawRows,msg,warn}).catch(err=>console.warn('Row cache not saved',err)),300);
-  return doneText;
+  LOADED=new Set(first);lastMsg={msg,warn};
+  rawRows=rows;menuSig=sig;finishBuild(msg,warn);presetLoadedMonths();
+  saveRowCache();
+  return doneText();
 }
+/* Load months that are not in the browser yet, then refresh every view keeping the filters as they are */
+async function ensureMonths(yms){
+  while(monthLoading)await monthLoading.catch(()=>{});
+  const need=[...new Set(yms)].filter(ym=>AVAIL.includes(ym)&&!LOADED.has(ym)).sort();
+  if(!need.length||!rawRows.length)return false;
+  const p=(async()=>{
+    const c=sb(),label=need.length<=3?need.map(ymShort).join(', '):`${need.length} months`;
+    setNavState('loading',`Loading ${label}…`);
+    try{
+      await loadRef(c);
+      const recs=await fetchMonths(c,need,d=>setNavState('loading',`Loading ${label}… ${d}/${need.length}`));
+      const {rows}=joinRecords(recs);
+      for(let i=0;i<rows.length;i++)rawRows.push(rows[i]);
+      need.forEach(ym=>LOADED.add(ym));
+      rebuildKeepFilters();saveRowCache();
+      setNavState('done',`Menu Mix loaded • showing ${loadedText()}`);
+    }catch(e){console.error(e);setNavState('error','Could not load '+label+': '+errText(e));throw e}
+  })();
+  monthLoading=p;
+  try{await p}finally{monthLoading=null}
+  return true;
+}
+function rebuildKeepFilters(){
+  const sel={};MS_IDS.forEach(id=>{sel[id]=getSelectedMulti(id)});
+  const vals={};['fFrom','fTo','sfFrom','sfTo','aFrom','aTo','bFrom','bTo'].forEach(id=>{vals[id]=$(id).value});
+  buildIndex();populateFilters();
+  MS_IDS.forEach(id=>{if(sel[id].length)setSelectedMulti(id,sel[id])});
+  Object.keys(vals).forEach(id=>{$(id).value=vals[id]});
+  gcache=null;applyFilters();
+}
+// months a Year / Month filter asks for (nothing ticked means "All", so every month)
+function monthsForFilter(prefix){
+  const ys=getSelectedMulti(prefix+'Year').map(Number),ms=getSelectedMulti(prefix+'Month').map(l=>MONTHS.indexOf(l)+1);
+  return AVAIL.filter(ym=>(!ys.length||ys.includes(+ym.slice(0,4)))&&(!ms.length||ms.includes(+ym.slice(5,7))));
+}
+const monthsInRange=(from,to)=>AVAIL.filter(ym=>(!to||ym+'-01'<=to)&&(!from||ym+'-31'>=from));
 
 async function startAuthed(){
   if(authLoading)return;authLoading=true;
@@ -1376,6 +1439,8 @@ function buildIndex(){
     const ck=r.__item+'\u0001'+r.__longName;
     if(!x.combos.has(ck))x.combos.set(ck,{cat:r.__category,sub:r.__sub,size:r.__size,prod:r.__longName});
   }
+  // months still in the database (not loaded yet) are offered in the Year / Month filters too
+  AVAIL.forEach(ym=>{x.years.add(+ym.slice(0,4));x.months.add(+ym.slice(5,7))});
   x.dateList=[...x.dates].sort(); x.comboList=[...x.combos.values()];
   x.codeByLabel=new Map([...x.storeCodes].map(([id,label])=>[label,id]));
   idx=x;
@@ -1480,12 +1545,17 @@ function populateFilters(){
   ['f','sf'].forEach(p=>{populateMultiSelect(p+'Year',years,false,true);populateMultiSelect(p+'Month',months,false,true)});
   ['f','sf'].forEach(p=>{$(p+'From').value='';$(p+'To').value=''});
   // Comparison date pickers: limited to the dates present in the data
-  const dMin=idx.dateList[0]||'',dMax=idx.dateList[idx.dateList.length-1]||'';
+  const dMin=AVAIL.length?AVAIL[0]+'-01':(idx.dateList[0]||''),dMax=idx.dateList[idx.dateList.length-1]||'';
   ['aFrom','aTo','bFrom','bTo'].forEach(id=>{const el=$(id);el.value='';el.min=dMin;el.max=dMax});
 }
 
 function onFilterChange(changedId){
   if(!idx)return;
+  // a Year / Month pick that needs months not loaded yet: load them first, then apply the filter
+  if(['fYear','fMonth','sfYear','sfMonth'].includes(changedId)){
+    const need=monthsForFilter(changedId.startsWith('sf')?'sf':'f');
+    if(need.some(ym=>!LOADED.has(ym))){ensureMonths(need).then(()=>onFilterChange(changedId),()=>{});return}
+  }
   if(COMPARE_IDS.includes(changedId)){ // Comparison view's own filters
     if(changedId==='cfAM'){
       const ams=getSelectedMulti('cfAM');let allowed;
@@ -1907,7 +1977,6 @@ function runComparison(){
     return {A,B,la:'Period A',lb:'Period B',scope:`Comparison • Period A: ${rangeText(ga)} • Period B: ${rangeText(gb)}`};
   }));
 }
-$('compareBtn').addEventListener('click',runComparison);
 
 const renderers={overview:renderOverview,products:renderProducts,stores:renderStores,menumix:renderMenuMix,sizes:renderSizes,compare:runComparison};
 /* Size Mix % inside the Comparison view: same periods and filters as the comparison above */
@@ -1958,8 +2027,15 @@ function renderCompareSizes(){
     return `${pct(a)} → ${pct(b)} <span class="${chgCls(Math.round(d*10))}">(${d>0?'+':''}${d.toFixed(1)})</span>`};
   tableRows('cmpStoreSizeRows',storeList,[{k:'name'},{k:'aq',num:true},{k:'bq',num:true}].concat(cols.map(c=>({num:true,v:r=>cell(r,c),html:x=>x}))),byKey('__store','Store',ctx));
 }
-renderers.compare=function(){runComparison();renderCompareSizes()};
-$('compareBtn').addEventListener('click',renderCompareSizes);
+// load any month the two periods need (not loaded yet) before comparing
+async function runFullComparison(){
+  if(!rawRows.length)return;
+  const a=periodRange('a'),b=periodRange('b');
+  try{await ensureMonths([...monthsInRange(a.from,a.to),...monthsInRange(b.from,b.to)])}catch(e){}
+  runComparison();renderCompareSizes();
+}
+renderers.compare=runFullComparison;
+$('compareBtn').addEventListener('click',runFullComparison);
 
 
 document.querySelectorAll('th.sortable').forEach(th=>{
@@ -2135,7 +2211,7 @@ const MODAL={
 function openMonthCompare(){
   if(!rawRows.length||!MODAL[activeView])return;
   modalView=activeView;
-  const yms=[...new Set(idx.dateList.map(d=>d.slice(0,7)))];
+  const yms=AVAIL.length?AVAIL.slice():[...new Set(idx.dateList.map(d=>d.slice(0,7)))]; // every month in the database
   const opts=yms.map(ym=>`<option value="${ym}">${ymLabel(ym)}</option>`).join('');
   $('mA').innerHTML=opts;$('mB').innerHTML=opts;
   if(yms.length){$('mA').value=yms[Math.max(0,yms.length-2)];$('mB').value=yms[yms.length-1]}
@@ -2153,6 +2229,7 @@ function openMonthCompare(){
 function closeMonthCompare(){$('cmpModal').classList.add('hidden');document.body.style.overflow=''}
 function renderMonthCompare(){
   const a=$('mA').value,b=$('mB').value;if(!a||!b)return;
+  if(AVAIL.length&&[a,b].some(ym=>!LOADED.has(ym))){ensureMonths([a,b]).then(renderMonthCompare,()=>{});return} // load the picked months first
   const from=Math.max(0,parseInt($('mFrom').value,10)||0),to=Math.max(0,parseInt($('mTo').value,10)||0);
   const mf=ym=>({y:new Set([+ym.slice(0,4)]),m:new Set([+ym.slice(5,7)]),from,to,any:true});
   const fa=mf(a),fb=mf(b),pred=moduleRowFilter(modalView),A=[],B=[];
