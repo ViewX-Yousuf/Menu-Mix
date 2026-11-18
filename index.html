@@ -715,7 +715,7 @@ window.addEventListener('message',e=>{
   const d=e.data||{};
   if(d.type==='viewx-session'&&typeof d.access_token==='string'){parentToken=d.access_token;tokenWaiters.splice(0).forEach(f=>f(parentToken))}
   else if(d.type==='viewx-signout'){
-    parentToken='';ME=null;rawRows=[];deleteFromDB(CACHE_KEY);
+    parentToken='';ME=null;rawRows=[];deleteFromDB(CACHE_KEY);forgetSso();
     try{sb().auth.signOut({scope:'local'}).catch(()=>{})}catch(err){}
     $('dashboard').classList.add('hidden');$('userBox').classList.add('hidden');showView('upload');
     setNavState('error','Signed out in the Sales dashboard');
@@ -730,6 +730,22 @@ async function exchangeSalesToken(token){
   if(!res.ok||!j.access_token)throw Error(j.error||('sign-in failed (HTTP '+res.status+')'));
   const {error}=await sb().auth.setSession({access_token:j.access_token,refresh_token:j.refresh_token});
   if(error)throw error;
+  try{localStorage.setItem(SSO_KEY,JSON.stringify({email:tokenEmail(token),t:Date.now()}))}catch(e){}
+}
+/* FAST RE-OPEN: the swap above takes several network calls. If the same person did it in the last
+   SSO_REUSE_MS, their Menu Mix sign-in is reused instead (roles and stores refresh at the next swap). */
+const SSO_KEY='viewx-mm-sso',SSO_REUSE_MS=30*60*1000;
+function tokenEmail(t){try{const p=t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');return String(JSON.parse(atob(p+'='.repeat((4-p.length%4)%4))).email||'').toLowerCase()}catch(e){return ''}}
+function forgetSso(){try{localStorage.removeItem(SSO_KEY)}catch(e){}}
+async function reuseMenuMixSession(salesToken){
+  try{
+    const email=tokenEmail(salesToken),last=JSON.parse(localStorage.getItem(SSO_KEY)||'null');
+    if(!email||!last||last.email!==email||Date.now()-last.t>SSO_REUSE_MS)return false;
+    const {data}=await sb().auth.getSession(),s=data&&data.session;
+    if(!s||!s.user||String(s.user.email||'').toLowerCase()!==email)return false;
+    if(s.expires_at*1000-Date.now()<120000){const r=await sb().auth.refreshSession();if(r.error||!r.data||!r.data.session)return false}
+    return true;
+  }catch(e){return false}
 }
 let sbClient=null;
 function sb(){
@@ -1130,7 +1146,7 @@ async function startAuthed(){
   let parsed=null,syncProblem='';
   try{
     status('loading','Signing in…');
-    if(SHARED){status('loading','Signing in with the Sales dashboard…');await exchangeSalesToken(await salesTokenFromParent())}
+    if(SHARED){status('loading','Signing in with the Sales dashboard…');const tok=await salesTokenFromParent();if(!await reuseMenuMixSession(tok))await exchangeSalesToken(tok)}
     const {data:me,error}=await sb().rpc('mm_me');if(error)throw error;
     ME={...me,stores:me.stores||[]};showUser();
     parsed=await getFromDB(CACHE_KEY).catch(()=>null);
