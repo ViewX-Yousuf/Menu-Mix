@@ -563,6 +563,17 @@ tbody.drillable tr:hover td{background:#e3edff}
     <div class="panel-head"><h3>Comparison detail</h3><span>Sales and quantity change</span></div>
     <div class="table-wrap"><table><thead><tr><th>Dimension</th><th class="num">A Qty</th><th class="num">B Qty</th><th class="num">Qty Change %</th><th class="num">A Sales</th><th class="num">B Sales</th><th class="num">Sales Change %</th></tr></thead><tbody id="compareRows"></tbody></table></div>
   </div>
+  <div class="table-panel" id="cmpSizePanel">
+    <div class="panel-head"><h3>Size Mix % comparison</h3><div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><span id="cmpSizeNote">Share of units, Period A vs Period B</span><div class="metric-toggle" title="Size group"><button type="button" id="cmpSz_hot" class="active" onclick="switchCmpSizeGroup('hot')">Hot</button><button type="button" id="cmpSz_cold" onclick="switchCmpSizeGroup('cold')">Cold</button><button type="button" id="cmpSz_joebox" onclick="switchCmpSizeGroup('joebox')">Joe Box</button></div></div></div>
+    <div class="chartbox"><canvas id="cmpSizeChart"></canvas></div>
+    <div class="table-wrap"><table><thead><tr><th>Size</th><th class="num">A Qty</th><th class="num">A Qty %</th><th class="num">B Qty</th><th class="num">B Qty %</th><th class="num">Qty % change</th><th class="num">A Sales %</th><th class="num">B Sales %</th><th class="num">Sales % change</th></tr></thead><tbody id="cmpSizeRows"></tbody></table></div>
+  </div>
+
+  <div class="table-panel">
+    <div class="panel-head"><h3>Store-wise Size Mix % comparison</h3><span>Period A % → Period B % of each store's qty</span></div>
+    <div class="table-wrap"><table><thead id="cmpStoreSizeHead"></thead><tbody id="cmpStoreSizeRows"></tbody></table></div>
+  </div>
+
 </section>
 
 </section><div class="footer">ViewX • Menu Mix Intelligence • Data is processed locally in this browser.</div></main></div>
@@ -1877,6 +1888,57 @@ function runComparison(){
 $('compareBtn').addEventListener('click',runComparison);
 
 const renderers={overview:renderOverview,products:renderProducts,stores:renderStores,menumix:renderMenuMix,sizes:renderSizes,compare:runComparison};
+/* Size Mix % inside the Comparison view: same periods and filters as the comparison above */
+let cmpSizeGroup='hot';
+function switchCmpSizeGroup(g){
+  cmpSizeGroup=g;
+  ['hot','cold','joebox'].forEach(k=>$('cmpSz_'+k).classList.toggle('active',k===g));
+  if(rawRows.length)renderCompareSizes();
+}
+const ptsTxt=v=>`${v>0?'+':''}${Number(v||0).toFixed(1)} pts`;
+function renderCompareSizes(){
+  if(!rawRows.length)return;
+  const fAms=toSet(getSelectedMulti('cfAM')),labels=getSelectedMulti('cfStore'),fStores=labels.length?new Set(labels.map(l=>idx.codeByLabel.get(l))):null;
+  const fCats=toSet(getSelectedMulti('cfCat')),fSubs=toSet(getSelectedMulti('cfSub'));
+  const pred=(fAms||fStores||fCats||fSubs)?r=>(!fAms||fAms.has(r.__manager))&&(!fStores||fStores.has(r.__storeId))&&(!fCats||fCats.has(r.__category))&&(!fSubs||fSubs.has(r.__sub)):null;
+  const ga=periodRange('a'),gb=periodRange('b'),bit=SG_BIT[cmpSizeGroup]||0,grpName=SIZE_GROUP_LABEL[cmpSizeGroup];
+  const sizes=new Map(),stores=new Map(),A={qty:0,sales:0},B={qty:0,sales:0},rowsA=[],rowsB=[];
+  for(let i=0;i<rawRows.length;i++){const r=rawRows[i];
+    if(!r.__y||!(r.__sg&bit))continue;
+    if(pred&&!pred(r))continue;
+    const inA=ga.test(r),inB=gb.test(r);if(!inA&&!inB)continue;
+    const name=String(r.__size||'Unmapped');
+    let s=sizes.get(name);if(!s)sizes.set(name,s={name,aq:0,bq:0,as:0,bs:0});
+    let st=stores.get(r.__store);if(!st)stores.set(r.__store,st={name:r.__store,aq:0,bq:0,as:0,bs:0,a:new Map(),b:new Map()});
+    if(inA){s.aq+=r.__qty;s.as+=r.__sales;A.qty+=r.__qty;A.sales+=r.__sales;st.aq+=r.__qty;st.as+=r.__sales;st.a.set(name,(st.a.get(name)||0)+r.__qty);rowsA.push(r)}
+    if(inB){s.bq+=r.__qty;s.bs+=r.__sales;B.qty+=r.__qty;B.sales+=r.__sales;st.bq+=r.__qty;st.bs+=r.__sales;st.b.set(name,(st.b.get(name)||0)+r.__qty);rowsB.push(r)}
+  }
+  const list=[...sizes.values()].sort((x,y)=>(y.bq-x.bq)||(y.aq-x.aq));
+  $('cmpSizeNote').textContent=`${grpName} • Period A: ${fmt(A.qty)} units • Period B: ${fmt(B.qty)} units`;
+  setChart('cmpSizeChart','bar',list.map(x=>x.name),[
+    {label:`Period A qty % (${rangeText(ga)})`,data:list.map(x=>share(x.aq,A.qty)),suffix:'%',backgroundColor:'#3267e9'},
+    {label:`Period B qty % (${rangeText(gb)})`,data:list.map(x=>share(x.bq,B.qty)),suffix:'%',backgroundColor:'#18a88b'}]);
+  const ctx=()=>({A:rowsA,B:rowsB,la:'Period A',lb:'Period B',scope:`Comparison • Size Mix % (${grpName}) • Period A: ${rangeText(ga)} • Period B: ${rangeText(gb)}`});
+  const dq=r=>share(r.bq,B.qty)-share(r.aq,A.qty),ds=r=>share(r.bs,B.sales)-share(r.as,A.sales);
+  tableRows('cmpSizeRows',list,[
+    {k:'name'},
+    {k:'aq',num:true},{num:true,v:r=>pct(share(r.aq,A.qty))},
+    {k:'bq',num:true},{num:true,v:r=>pct(share(r.bq,B.qty))},
+    {num:true,v:r=>ptsTxt(dq(r)),cls:r=>chgCls(Math.round(dq(r)*10))},
+    {num:true,v:r=>pct(share(r.as,A.sales))},{num:true,v:r=>pct(share(r.bs,B.sales))},
+    {num:true,v:r=>ptsTxt(ds(r)),cls:r=>chgCls(Math.round(ds(r)*10))}
+  ],byKey('__size','Size',ctx));
+  // store-wise: each size as Period A % -> Period B % of that store's units
+  const cols=list.map(x=>x.name).sort();
+  $('cmpStoreSizeHead').innerHTML='<tr><th>Store</th><th class="num">A Qty</th><th class="num">B Qty</th>'+cols.map(c=>`<th class="num">${esc(c)} %</th>`).join('')+'</tr>';
+  const storeList=[...stores.values()].sort((x,y)=>(y.bq-x.bq)||(y.aq-x.aq));
+  const cell=(r,c)=>{const a=share((r.a&&r.a.get(c))||0,r.aq),b=share((r.b&&r.b.get(c))||0,r.bq),d=b-a;
+    return `${pct(a)} → ${pct(b)} <span class="${chgCls(Math.round(d*10))}">(${d>0?'+':''}${d.toFixed(1)})</span>`};
+  tableRows('cmpStoreSizeRows',storeList,[{k:'name'},{k:'aq',num:true},{k:'bq',num:true}].concat(cols.map(c=>({num:true,v:r=>cell(r,c),html:x=>x}))),byKey('__store','Store',ctx));
+}
+renderers.compare=function(){runComparison();renderCompareSizes()};
+$('compareBtn').addEventListener('click',renderCompareSizes);
+
 
 document.querySelectorAll('th.sortable').forEach(th=>{
   th.addEventListener('click',()=>{
