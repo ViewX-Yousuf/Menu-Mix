@@ -217,6 +217,7 @@ tbody tr:hover{background:#f8fbff}
 .filters{display:grid;grid-template-columns:repeat(var(--cols,5),minmax(0,1fr));gap:12px 14px;padding:14px 18px 18px;align-items:end;margin-bottom:0}
 .filters-head{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center;gap:16px;padding-bottom:12px;margin-bottom:2px;border-bottom:1px solid var(--line)}
 .filters-title{font-size:12.5px;font-weight:800;color:var(--ink)}
+.load-hint{font-size:11px;font-weight:600;color:#9a6a0f;background:#fff6e2;border:1px solid #f3dca6;padding:4px 10px;border-radius:999px}
 .filters-note{font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5;max-width:920px}
 .filter{min-width:0;flex:none}
 .filter label{font-size:9.5px;letter-spacing:.7px;margin-bottom:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -387,7 +388,7 @@ tbody.drillable tr:hover td{background:#e3edff}
 <div id="globalFiltersBar">
   <div class="filters" style="--cols:5">
     <div class="filters-head">
-      <div class="filters-title" id="gfTitle">Filters</div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div class="filters-title" id="gfTitle">Filters</div><span class="load-hint hidden" id="fLoadHint"></span></div>
       <div class="head-right">
         <div class="actions-slot"></div>
         <div class="metric-toggle" title="Show figures by sales value or by quantity">
@@ -470,7 +471,7 @@ tbody.drillable tr:hover td{background:#e3edff}
 <section class="view" id="view-sizes">
   <div class="filters" style="--cols:6">
     <div class="filters-head">
-      <div class="filters-title">Size Mix %</div>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><div class="filters-title">Size Mix %</div><span class="load-hint hidden" id="sfLoadHint"></span></div>
       <div class="head-right">
         <div class="actions-slot"></div>
         <div class="metric-toggle" title="Size group">
@@ -1606,8 +1607,10 @@ function populateFilters(){
 
 function onFilterChange(changedId){
   if(!idx)return;
-  // a Year / Month pick that needs months not loaded yet: load them first, then apply the filter
-  if(['fYear','fMonth','sfYear','sfMonth'].includes(changedId)){
+  // A Month pick loads the ticked months for the selected years. A Year pick loads only the months
+  // already ticked in the Month filter; with Month on "All" a Year pick loads nothing (no whole year by accident).
+  const yearPick=['fYear','sfYear'].includes(changedId);
+  if(['fMonth','sfMonth'].includes(changedId)||(yearPick&&getSelectedMulti(changedId.replace('Year','Month')).length)){
     const need=monthsForFilter(changedId.startsWith('sf')?'sf':'f');
     if(need.some(ym=>!LOADED.has(ym))){ensureMonths(need).then(()=>onFilterChange(changedId),()=>{});return}
   }
@@ -1662,7 +1665,18 @@ function applyFilters(changedId){
     markDirty('sizes');
   }
   if(!changedId)markDirty('compare');
+  updateLoadHints();
   renderActive();
+}
+// note shown when a selected year has months that are not loaded yet
+function updateLoadHints(){
+  [['f','fLoadHint'],['sf','sfLoadHint']].forEach(([p,id])=>{
+    const el=$(id);if(!el)return;
+    const ys=getSelectedMulti(p+'Year').map(Number);
+    const missing=[...new Set(AVAIL.filter(ym=>ys.includes(+ym.slice(0,4))&&!LOADED.has(ym)&&!AVAIL.filter(x=>x.slice(0,4)===ym.slice(0,4)).some(x=>LOADED.has(x))).map(ym=>ym.slice(0,4)))];
+    el.textContent=missing.length?`${missing.join(', ')} ${missing.length===1?"isn't":"aren't"} loaded yet — pick ${missing.length===1?'its':'their'} months in the Month filter to load them`:'';
+    el.classList.toggle('hidden',!missing.length);
+  });
 }
 initMultiSelects();
 
