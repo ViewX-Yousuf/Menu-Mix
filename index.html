@@ -971,6 +971,22 @@ function parseUsers(rows){
 }
 
 /* ADMIN: copy files that changed in the bucket into the database */
+/* Compare the file's per-day totals (rows, qty, amount) with the database and keep only days
+   that are new or different. If the database check is missing or fails, every row is kept. */
+async function changedDays(c,rows){
+  const all=()=>({rows,days:new Set(rows.map(r=>r.dob)).size});
+  let data;
+  try{const res=await c.rpc('mm_day_sums');if(res.error)throw res.error;data=res.data}
+  catch(e){console.warn('Day check not available, saving the whole file',e);return all()}
+  if(!Array.isArray(data))return all();
+  const dbDays=new Map(data.map(x=>[String(x[0]).slice(0,10),x]));
+  const fileDays=new Map();
+  for(const r of rows){let d=fileDays.get(r.dob);if(!d)fileDays.set(r.dob,d={n:0,q:0,a:0});d.n++;d.q+=+r.qty||0;d.a+=+r.amount||0}
+  const keep=new Set();
+  fileDays.forEach((v,d)=>{const x=dbDays.get(d);
+    if(!x||+x[1]!==v.n||Math.abs(+x[2]-v.q)>0.01||Math.abs(+x[3]-v.a)>0.5)keep.add(d)});
+  return {rows:rows.filter(r=>keep.has(r.dob)),days:keep.size};
+}
 async function adminSync(status){
   const c=sb(),F=SUPABASE.files;
   const {data:ver,error}=await c.rpc('mm_version');if(error)throw error;
@@ -993,12 +1009,18 @@ async function adminSync(status){
       rows.push({dob:r.date,str_id:r.storeId,str_name:r.storeName||null,item:r.item,item_name:r.name||r.long||null,qty:r.qty,amount:r.sales});
     }
     if(!rows.length)throw Error('the Menu Mix file has no rows with a date, item and store');
+    // only days that are new or different from the database are saved (all rows if the check is not available)
+    status('loading','Checking which days changed…');
+    const toSave=await changedDays(c,rows);
     let res=await c.rpc('mm_stage_clear');if(res.error)throw res.error;
-    const BATCH=5000;
-    for(let i=0;i<rows.length;i+=BATCH){
-      status('loading',`Saving Menu Mix to the database ${Math.round(Math.min(i+BATCH,rows.length)/rows.length*100)}%`);
-      for(let tries=0;;){const {error:e}=await c.from('mm_stage').insert(rows.slice(i,i+BATCH));if(!e)break;if(++tries>=3)throw e;await tick(1500*tries)}
-    }
+    const BATCH=5000,batches=[];
+    for(let i=0;i<toSave.rows.length;i+=BATCH)batches.push(toSave.rows.slice(i,i+BATCH));
+    let next=0,done=0;
+    const worker=async()=>{while(next<batches.length){const b=batches[next++];
+      for(let tries=0;;){const {error:e}=await c.from('mm_stage').insert(b);if(!e)break;if(++tries>=3)throw e;await tick(1500*tries)}
+      done++;status('loading',`Saving ${fmt(toSave.days)} changed day${toSave.days===1?'':'s'} to the database ${Math.round(done/batches.length*100)}%`)}};
+    if(batches.length)status('loading',`Saving ${fmt(toSave.days)} changed day${toSave.days===1?'':'s'} to the database 0%`);
+    await Promise.all([0,1,2,3].map(worker)); // four batches at a time
     status('loading','Finishing the Menu Mix update…');
     res=await c.rpc('mm_commit',{p_file:fm.name,p_sig:stSig(fm)});if(res.error)throw res.error;
   }
