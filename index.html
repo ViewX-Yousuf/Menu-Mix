@@ -130,7 +130,10 @@ tbody tr:hover{background:#f8fbff}
 .footer{font-size:10px;color:#8a97a9;text-align:center;margin-top:18px}
 .view{display:none}
 .view.active{display:block}
-.split{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:14px}
+/* cards and their parts never grow wider than the screen; wide tables scroll sideways inside their card */
+.chart-with-table>*,.split>*,.panel,.table-panel,#mSections,#drillSections{min-width:0;max-width:100%}
+.cmp-body{overflow-x:hidden}
 .compare-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
 .control label{display:block;font-size:10px;font-weight:700;color:var(--muted);margin-bottom:5px}
 .control>select,.control>input{width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;background:white;font-size:11px}
@@ -163,7 +166,7 @@ tbody tr:hover{background:#f8fbff}
 }
 @media(min-width: 900px) {
   .chart-with-table {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0,1fr) minmax(0,1fr); /* a wide table scrolls inside its half instead of pushing the page wider */
     align-items: stretch;
   }
   .chart-with-table .chart-col {
@@ -2408,7 +2411,12 @@ function pdfHeader(title,scopes,width,note){
 async function pdfCapture(el){
   const info={rows:[],head:null};
   const estimate=el.offsetHeight+el.querySelectorAll('tbody tr').length*34;
-  const canvas=await html2canvas(el,{scale:Math.max(1,Math.min(2,15000/Math.max(1,estimate))),backgroundColor:'#f4f7fb',logging:false,onclone:(doc,c)=>{
+  // a table wider than its card is printed with all its columns: the card is widened to the table's full width
+  let extra=0;el.querySelectorAll('.table-wrap').forEach(w=>{extra=Math.max(extra,w.scrollWidth-w.clientWidth)});
+  const fullW=Math.ceil(el.getBoundingClientRect().width+extra);
+  const canvas=await html2canvas(el,{scale:Math.max(1,Math.min(2,15000/Math.max(1,estimate),12000/Math.max(1,fullW))),backgroundColor:'#f4f7fb',logging:false,
+    windowWidth:Math.max(window.innerWidth,fullW+80),onclone:(doc,c)=>{
+    if(extra>0){c.style.width=fullW+'px';c.style.maxWidth='none'}
     c.querySelectorAll('.table-col').forEach(x=>{x.style.height='auto'});
     c.querySelectorAll('.table-wrap').forEach(w=>{w.style.setProperty('max-height','none','important');w.style.overflow='visible';w.style.flex='none'});
     c.querySelectorAll('tfoot td,th').forEach(x=>{x.style.position='static'}); // Total row and headings in normal flow for the picture
