@@ -743,25 +743,48 @@ async function exchangeSalesToken(token){
   const res=await fetch(`${SUPABASE.url}/functions/v1/sales-sso`,{method:'POST',
     headers:{'Content-Type':'application/json',apikey:SUPABASE.anonKey},body:JSON.stringify({token})});
   const j=await res.json().catch(()=>({}));
-  if(!res.ok||!j.access_token)throw Error(j.error||('sign-in failed (HTTP '+res.status+')'));
+  if(!res.ok||!j.access_token){const er=Error(j.error||('sign-in failed (HTTP '+res.status+')'));er.status=res.status;throw er}
   const {error}=await sb().auth.setSession({access_token:j.access_token,refresh_token:j.refresh_token});
   if(error)throw error;
   try{localStorage.setItem(SSO_KEY,JSON.stringify({email:tokenEmail(token),t:Date.now()}))}catch(e){}
 }
-/* FAST RE-OPEN: the swap above takes several network calls. If the same person did it in the last
-   SSO_REUSE_MS, their Menu Mix sign-in is reused instead (roles and stores refresh at the next swap). */
-const SSO_KEY='viewx-mm-sso',SSO_REUSE_MS=30*60*1000;
+/* FAST RE-OPEN: the swap above takes several network calls. The same person's Menu Mix sign-in is
+   reused instead: within SSO_REUSE_MS as it is, and up to SSO_KEEP_MS with the swap done again
+   quietly after the data is on screen (that picks up role and store changes made in the Sales dashboard). */
+const SSO_KEY='viewx-mm-sso',SSO_REUSE_MS=30*60*1000,SSO_KEEP_MS=7*24*60*60*1000;
 function tokenEmail(t){try{const p=t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/');return String(JSON.parse(atob(p+'='.repeat((4-p.length%4)%4))).email||'').toLowerCase()}catch(e){return ''}}
 function forgetSso(){try{localStorage.removeItem(SSO_KEY)}catch(e){}}
 async function reuseMenuMixSession(salesToken){
   try{
     const email=tokenEmail(salesToken),last=JSON.parse(localStorage.getItem(SSO_KEY)||'null');
-    if(!email||!last||last.email!==email||Date.now()-last.t>SSO_REUSE_MS)return false;
+    if(!email||!last||last.email!==email||Date.now()-last.t>SSO_KEEP_MS)return false;
     const {data}=await sb().auth.getSession(),s=data&&data.session;
     if(!s||!s.user||String(s.user.email||'').toLowerCase()!==email)return false;
     if(s.expires_at*1000-Date.now()<120000){const r=await sb().auth.refreshSession();if(r.error||!r.data||!r.data.session)return false}
-    return true;
+    return Date.now()-last.t>SSO_REUSE_MS?'stale':'fresh';
   }catch(e){return false}
+}
+// the quiet swap for a reused sign-in: if the role or stores changed, load again; if access was removed, sign out here
+function refreshSsoLater(tok){
+  exchangeSalesToken(tok).then(async()=>{
+    const {data,error}=await sb().rpc('mm_me');if(error||!data)return;
+    if(JSON.stringify({...data,stores:data.stores||[]})!==JSON.stringify(ME))startAuthed();
+  }).catch(e=>{
+    console.warn('Menu Mix sign-in refresh failed',e);
+    if(e&&(e.status===401||e.status===403)){
+      parentToken='';ME=null;rawRows=[];deleteFromDB(CACHE_KEY);forgetSso();
+      try{sb().auth.signOut({scope:'local'}).catch(()=>{})}catch(err){}
+      $('dashboard').classList.add('hidden');$('userBox').classList.add('hidden');showView('upload');
+      setNavState('error','No Menu Mix access: '+errText(e));setSrcStatus('No Menu Mix access: '+errText(e),true);
+    }
+  });
+}
+// FAST OPEN: this person's last loaded data from this browser goes on screen at once (it is checked right after)
+function showCachedFor(email,p){
+  if(rawRows.length||!email||!p||p.v!==CACHE_VERSION||!p.me||String(p.me.email||'').toLowerCase()!==email||!Array.isArray(p.avail)||!p.rows||!p.rows.length)return false;
+  ME=p.me;showUser();AVAIL=p.avail;LOADED=new Set(p.loaded||[]);lastMsg={msg:p.msg,warn:p.warn};
+  rawRows=p.rows;menuSig=p.menuSig;finishBuild(p.msg,p.warn);presetLoadedMonths();
+  return true;
 }
 let sbClient=null;
 function sb(){
@@ -1019,10 +1042,13 @@ async function changedDays(c,rows){
     if(!x||+x[1]!==v.n||Math.abs(+x[2]-v.q)>0.01||Math.abs(+x[3]-v.a)>0.5)keep.add(d)});
   return {rows:rows.filter(r=>keep.has(r.dob)),days:keep.size};
 }
-async function adminSync(status){
-  const c=sb(),F=SUPABASE.files;
-  const {data:ver,error}=await c.rpc('mm_version');if(error)throw error;
-  const have=ver&&ver.files||{},list=await stList(),find=k=>stFind(list,F[k]);
+// ver: mm_version already read by the sign-in step; listP: the bucket list if it was started early.
+// Returns true when something was copied (the version then has to be read again).
+async function adminSync(status,ver,listP){
+  const c=sb(),F=SUPABASE.files;let changed=false;
+  if(!ver){const {data,error}=await c.rpc('mm_version');if(error)throw error;ver=data}
+  let list=listP?await listP:null;if(list instanceof Error)throw list;if(!list)list=await stList();
+  const have=ver&&ver.files||{},find=k=>stFind(list,F[k]);
   // Users are managed in the Sales dashboard now, so only the two mapping files are copied
   for(const [k,fn,label] of [['category','mm_replace_category','Category mapping'],['allocation','mm_replace_allocation','Store allocation']]){
     const f=find(k);if(!f||have[k]===stSig(f))continue;
@@ -1030,6 +1056,7 @@ async function adminSync(status){
     const file=await stDownload(f),sheet=await readSheet(file);
     const rows=parseRef(k,sheet,file.name).rows;
     const {error:e}=await c.rpc(fn,{p_rows:rows,p_sig:stSig(f)});if(e)throw Error(`${label}: ${e.message}`);
+    changed=true;
   }
   const fm=find('menu');
   if(fm&&have.menu!==stSig(fm)){
@@ -1055,7 +1082,9 @@ async function adminSync(status){
     await Promise.all([0,1,2,3].map(worker)); // four batches at a time
     status('loading','Finishing the Menu Mix update…');
     res=await c.rpc('mm_commit',{p_file:fm.name,p_sig:stSig(fm)});if(res.error)throw res.error;
+    changed=true;
   }
+  return changed;
 }
 
 /* EVERYONE: read this person's data from the database.
@@ -1087,7 +1116,7 @@ async function fetchMonths(c,list,onDone){
   return recs;
 }
 function saveRowCache(){
-  setTimeout(()=>saveToDB(CACHE_KEY,{v:CACHE_VERSION,sig:refSig(),menuSig,rows:rawRows,msg:lastMsg.msg,warn:lastMsg.warn,loaded:[...LOADED]}).catch(err=>console.warn('Row cache not saved',err)),300);
+  setTimeout(()=>saveToDB(CACHE_KEY,{v:CACHE_VERSION,sig:refSig(),menuSig,rows:rawRows,msg:lastMsg.msg,warn:lastMsg.warn,loaded:[...LOADED],avail:AVAIL.slice(),me:ME}).catch(err=>console.warn('Row cache not saved',err)),300);
 }
 // tick the loaded months in the Year / Month filters (main dashboard and Size Mix)
 function presetLoadedMonths(){
@@ -1096,9 +1125,9 @@ function presetLoadedMonths(){
   ['f','sf'].forEach(p=>{setSelectedMulti(p+'Year',ys);setSelectedMulti(p+'Month',ms)});
   applyFilters();
 }
-async function loadMyData(status,parsed){
+async function loadMyData(status,parsed,ver){
   const c=sb();
-  const {data:ver,error:e1}=await c.rpc('mm_version');if(e1)throw e1;
+  if(!ver){const {data,error:e1}=await c.rpc('mm_version');if(e1)throw e1;ver=data}
   const salesV=String(ver.sales_version),refV=String(ver.ref_version),userKey=ME.email+'|'+ME.role+'|'+(ME.stores||[]).join(';');
   const sig=`${salesV}|${refV}|${userKey}`;
   refVer=refV;AVAIL=[...(ver.months||[])].map(String).sort();
@@ -1106,16 +1135,20 @@ async function loadMyData(status,parsed){
   if(rawRows.length&&menuSig===sig)return doneText();                                               // already showing this
   if(parsed&&parsed.v===CACHE_VERSION&&parsed.menuSig===sig&&parsed.rows&&parsed.rows.length){        // same data, same person
     LOADED=new Set(parsed.loaded||AVAIL);lastMsg={msg:parsed.msg,warn:parsed.warn};
-    rawRows=parsed.rows;menuSig=sig;finishBuild(parsed.msg,parsed.warn);presetLoadedMonths();return doneText()}
-  await loadRef(c);
+    rawRows=parsed.rows;menuSig=sig;finishBuild(parsed.msg,parsed.warn);presetLoadedMonths();
+    if(!parsed.me||!parsed.avail||String(parsed.avail)!==String(AVAIL))saveRowCache(); // add what the fast open needs
+    return doneText()}
   if(!AVAIL.length)throw Error(ME.all||(ME.stores||[]).length?'there is no Menu Mix data for your stores yet':'no stores are assigned to your account yet — ask the admin');
   const first=AVAIL.slice(-INITIAL_MONTHS);
   status('loading',`Loading ${first.map(ymShort).join(' and ')}`);
-  const recs=await fetchMonths(c,first);
+  const recs=(await Promise.all([fetchMonths(c,first),loadRef(c)]))[0]; // months and mappings at the same time
   status('loading','Processing…');await tick(30);
   const {rows,msg,warn}=joinRecords(recs);
+  // data already on screen (last loaded copy) with the same months: refresh it keeping the filters as they are
+  const keep=rawRows.length&&LOADED.size===first.length&&first.every(ym=>LOADED.has(ym));
   LOADED=new Set(first);lastMsg={msg,warn};
-  rawRows=rows;menuSig=sig;finishBuild(msg,warn);presetLoadedMonths();
+  rawRows=rows;menuSig=sig;
+  if(keep){rebuildKeepFilters();setMessage(msg,warn)}else{finishBuild(msg,warn);presetLoadedMonths()}
   saveRowCache();
   return doneText();
 }
@@ -1159,22 +1192,36 @@ const monthsInRange=(from,to)=>AVAIL.filter(ym=>(!to||ym+'-01'<=to)&&(!from||ym+
 async function startAuthed(){
   if(authLoading)return;authLoading=true;
   const status=(state,text,warn)=>{setNavState(state,text);setSrcStatus(text,warn);setMessage(text,warn)};
-  let parsed=null,syncProblem='';
+  let parsed=null,syncProblem='',fromCache=false,verified=false,laterSwap='';
   try{
     status('loading','Signing in…');
-    if(SHARED){status('loading','Signing in with the Sales dashboard…');const tok=await salesTokenFromParent();if(!await reuseMenuMixSession(tok))await exchangeSalesToken(tok)}
-    const {data:me,error}=await sb().rpc('mm_me');if(error)throw error;
-    ME={...me,stores:me.stores||[]};showUser();
-    parsed=await getFromDB(CACHE_KEY).catch(()=>null);
+    const cacheP=getFromDB(CACHE_KEY).catch(()=>null);
+    if(SHARED){
+      status('loading','Signing in with the Sales dashboard…');const tok=await salesTokenFromParent();
+      fromCache=showCachedFor(tokenEmail(tok),await cacheP);
+      if(fromCache)status('loading','Checking for new data…');
+      const reuse=await reuseMenuMixSession(tok);
+      if(!reuse)await exchangeSalesToken(tok);else if(reuse==='stale')laterSwap=tok;
+    }
+    // who this is, the data version and (for an admin) the bucket list, all at the same time
+    const c=sb(),listP=fromCache&&ME&&ME.role==='admin'?stList().catch(e=>e instanceof Error?e:Error(errText(e))):null;
+    const [meR,verR]=await Promise.all([c.rpc('mm_me'),c.rpc('mm_version')]);
+    if(meR.error)throw meR.error;if(verR.error)throw verR.error;
+    const me=meR.data;let ver=verR.data;
+    ME={...me,stores:me.stores||[]};verified=true;showUser();
+    parsed=await cacheP;
     if(parsed&&parsed.menuSig&&!String(parsed.menuSig).includes('|'+ME.email+'|')){await deleteFromDB(CACHE_KEY);parsed=null} // never show one person's cache to another
     if(ME.role==='admin'){
-      try{await adminSync(status)}catch(e){console.error(e);syncProblem='Could not copy the new files from the bucket: '+errText(e)}
+      try{if(await adminSync(status,ver,listP))ver=null}catch(e){console.error(e);syncProblem='Could not copy the new files from the bucket: '+errText(e)}
     }
-    const doneText=await loadMyData(status,parsed);
+    const doneText=await loadMyData(status,parsed,ver);
     if(syncProblem)status('error',syncProblem+' Showing the data already in the database.',true);
     else status('done',doneText);
+    if(laterSwap)setTimeout(()=>refreshSsoLater(laterSwap),1500);
   }catch(e){
     const m=errText(e);console.error(e);
+    if(fromCache&&!verified){ // the last loaded copy was on screen but the sign-in did not go through: take it off
+      ME=null;rawRows=[];menuSig='';$('dashboard').classList.add('hidden');$('userBox').classList.add('hidden');showView('upload')}
     if(/JWT|session|sign in|Sales dashboard|no active access/i.test(m)&&!ME){
       if(SHARED){status('error',m,true);showView('upload');return}
       showLogin('Sign in with your Sales dashboard email and password.');return}
