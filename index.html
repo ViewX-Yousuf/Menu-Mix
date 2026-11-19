@@ -134,6 +134,25 @@ tbody tr:hover{background:#f8fbff}
 /* cards and their parts never grow wider than the screen; wide tables scroll sideways inside their card */
 .chart-with-table>*,.split>*,.panel,.table-panel,#mSections,#drillSections{min-width:0;max-width:100%}
 .cmp-body{overflow-x:hidden}
+/* a table that does not fit beside its chart goes below it, full width */
+.chart-with-table.stacked{grid-template-columns:minmax(0,1fr)!important}
+.chart-with-table.stacked .table-col{height:auto!important}
+/* table tools: sort arrows, Columns button and menu */
+th .ts-ico{display:inline-block;margin-left:4px;font-size:9px;color:#3267e9;min-width:6px}
+th.ts-on{color:#3267e9!important;background:#eef4ff!important}
+.tbl-tools{display:flex;justify-content:flex-end;position:relative;margin:0 0 6px}
+.tbl-colbtn{border:1px solid var(--line);background:#fff;color:#52637a;font:600 11px/1 inherit;padding:5px 10px;border-radius:8px;cursor:pointer}
+.tbl-colbtn:hover{border-color:#3267e9;color:#3267e9}
+.tbl-colmenu{position:absolute;right:0;top:calc(100% + 4px);z-index:60;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 30px rgba(20,36,59,.16);padding:8px;min-width:220px;max-height:320px;overflow:auto}
+.tbl-colmenu.hidden{display:none}
+.tbl-colmenu label{display:flex;align-items:center;gap:8px;padding:5px 6px;border-radius:6px;font-size:12px;color:#2a3950;cursor:pointer;white-space:nowrap}
+.tbl-colmenu label:hover{background:#f1f6ff}
+.tbl-colmenu input:disabled+span{color:#8a97a9}
+.tbl-colacts{border-top:1px solid var(--line);margin-top:6px;padding-top:6px;text-align:right}
+.tbl-colacts button{border:0;background:none;color:#3267e9;font-weight:700;font-size:12px;cursor:pointer}
+.chart-with-table.stacked .chart-col{height:auto!important}
+.chart-with-table.stacked .chart-col .chartbox{flex:none!important;height:var(--h,350px)!important}
+.chart-with-table.stacked .table-col .table-wrap{flex:none!important;max-height:430px!important}
 .compare-controls{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
 .control label{display:block;font-size:10px;font-weight:700;color:var(--muted);margin-bottom:5px}
 .control>select,.control>input{width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;background:white;font-size:11px}
@@ -1558,9 +1577,21 @@ function buildIndex(){
 const GLOBAL_VIEWS=['overview','products','stores','menumix'];
 function markDirty(...views){views.forEach(v=>dirty.add(v))}
 function renderActive(){
-  if(!rawRows.length||!dirty.has(activeView))return;
-  const fn=renderers[activeView]; dirty.delete(activeView); if(fn)fn();
+  if(!rawRows.length)return;
+  if(dirty.has(activeView)){const fn=renderers[activeView]; dirty.delete(activeView); if(fn)fn()}
+  fitChartTables();
 }
+// chart + table cards: when the table is wider than its half, it moves below the chart
+function fitChartTables(){
+  document.querySelectorAll('.chart-with-table').forEach(p=>{
+    if(!p.offsetParent)return; // hidden view: checked when it is shown
+    p.classList.remove('stacked');
+    const w=p.querySelector('.table-col .table-wrap');
+    if(w&&w.scrollWidth>w.clientWidth+2)p.classList.add('stacked');
+  });
+  refreezeTables(); // column widths may have changed
+}
+window.addEventListener('resize',()=>{clearTimeout(fitChartTables.t);fitChartTables.t=setTimeout(fitChartTables,200)});
 
 /* =========================================
    METRIC & SIZE TOGGLE LOGIC
@@ -1699,8 +1730,43 @@ function onFilterChange(changedId){
   applyFilters(changedId);
 }
 
+/* LINKED FILTERS: the same filter in the Dashboard modules, Size Mix % and Comparison follows one another,
+   so a pick in any module shows in all of them (Area Manager, Store, Category, Sub Category, Year, Month, days). */
+const FILTER_LINKS=[['fAM','sfAM','cfAM'],['fStore','sfStore','cfStore'],['fCategory','cfCat'],['fSub','cfSub'],['fYear','sfYear'],['fMonth','sfMonth']];
+let filterLinking=false;
+// store name <-> "code — name" (the Comparison store list uses codes)
+function storeLabelMaps(){
+  if(idx._s2l)return idx;
+  const s2l=new Map(),l2s=new Map();
+  for(let i=0;i<rawRows.length;i++){const r=rawRows[i];if(!s2l.has(r.__store)){const l=idx.storeCodes.get(r.__storeId);if(l){s2l.set(r.__store,l);l2s.set(l,r.__store)}}}
+  idx._s2l=s2l;idx._l2s=l2s;return idx;
+}
+// ticked values, with "everything ticked" counted as All (= nothing ticked)
+function pickedOf(id){const list=$(`${id}_list`);if(!list)return [];const all=list.querySelectorAll('input[type="checkbox"]').length,v=getSelectedMulti(id);return v.length===all?[]:v}
+{
+  const baseChange=onFilterChange;
+  onFilterChange=function(id){
+    baseChange(id);
+    if(filterLinking||!idx)return;
+    const grp=FILTER_LINKS.find(g=>g.includes(id));if(!grp)return;
+    const vals=pickedOf(id),store=grp[0]==='fStore',m=store?storeLabelMaps():null;
+    filterLinking=true;
+    try{
+      for(const t of grp){if(t===id||!$(`${t}_list`))continue;
+        let v=vals;
+        if(store&&id==='cfStore')v=vals.map(x=>m._l2s.get(x)).filter(Boolean);
+        if(store&&t==='cfStore'&&id!=='cfStore')v=vals.map(x=>m._s2l.get(x)).filter(Boolean);
+        if(String(pickedOf(t).slice().sort())===String(v.slice().sort()))continue;
+        setSelectedMulti(t,v);baseChange(t);
+      }
+    }finally{filterLinking=false}
+  };
+}
 const toSet=arr=>arr.length?new Set(arr):null;
 ['fFrom','fTo','sfFrom','sfTo'].forEach(id=>$(id).addEventListener('input',debounce(()=>applyFilters(id),250)));
+// day boxes: Dashboard and Size Mix % follow one another
+[['fFrom','sfFrom'],['fTo','sfTo']].forEach(pair=>pair.forEach((id,i)=>{const other=pair[1-i];
+  $(id).addEventListener('input',debounce(()=>{if($(other).value!==$(id).value){$(other).value=$(id).value;applyFilters(other)}},260))}));
 ['aFrom','aTo','bFrom','bTo'].forEach(id=>$(id).addEventListener('change',()=>{markDirty('compare');renderActive()}));
 
 function applyFilters(changedId){
@@ -1818,17 +1884,20 @@ function sumRows(rows){
 }
 /* drill (optional): clicking a row opens the Area Manager / Store breakdown popup for it */
 function tableRows(id,rows,cols,drill,limit=500){
-  const tb=$(id),n=Math.min(rows.length,limit);let html='';
-  for(let i=0;i<n;i++){const r=rows[i];html+=drill?`<tr data-i="${i}" title="Click for Area Manager and Store details">`:'<tr>';
-    for(let j=0;j<cols.length;j++){const c=cols[j],v=typeof c.v==='function'?c.v(r):r[c.k],cls=typeof c.cls==='function'?c.cls(r):(c.cls||'');
-      html+=`<td class="${c.num?'num':''} ${cls}">${c.html?c.html(v):esc(v??'')}</td>`}
-    html+='</tr>'}
-  tb.innerHTML=html||`<tr><td colspan="${cols.length}" class="empty">No matching records</td></tr>`;
+  const tb=$(id);if(!tb)return;
+  // every cell is worked out once, so a re-sort keeps each row's values (ranks included)
+  const cells=new Array(rows.length),clss=new Array(rows.length);
+  for(let i=0;i<rows.length;i++){const r=rows[i],v=new Array(cols.length),k=new Array(cols.length);
+    for(let j=0;j<cols.length;j++){const c=cols[j];v[j]=typeof c.v==='function'?c.v(r):r[c.k];k[j]=typeof c.cls==='function'?c.cls(r):(c.cls||'')}
+    cells[i]=v;clss[i]=k}
+  tb._t={rows,cols,cells,clss,limit};
   tb._rows=rows;tb._drill=drill||null;tb.classList.toggle('drillable',!!drill);
+  paintRows(tb);
+  tblEnhance(tb);
   // Total row (over all rows, not only the ones shown); text columns stay empty
   const table=tb.closest('table');if(!table)return;
   let tf=table.tFoot;
-  if(!rows.length){if(tf)tf.innerHTML='';return}
+  if(!rows.length){if(tf)tf.innerHTML='';tblDecorate(tb);return}
   if(!tf)tf=table.createTFoot();
   const t=sumRows(rows);let f='<tr>';
   for(let j=0;j<cols.length;j++){const c=cols[j];let v='';
@@ -1836,7 +1905,109 @@ function tableRows(id,rows,cols,drill,limit=500){
     else if(c.num){try{const x=typeof c.v==='function'?c.v(t):t[c.k];v=c.html?c.html(x):esc(typeof x==='number'?fmt(x):x??'')}catch(e){v=''}}
     f+=`<td class="${c.num?'num':''}">${v}</td>`}
   tf.innerHTML=f+'</tr>';
+  tblDecorate(tb);
 }
+
+/* =========================================
+   TABLE TOOLS (every table)
+   - Sort: click a column heading. Numbers go high→low first, text A→Z; a second click reverses,
+     a third click goes back to the normal order. All rows are sorted, not only the ones shown.
+   - Columns: the "Columns" button above each table shows / hides columns (remembered in this browser).
+   - Frozen columns: the columns up to the product name (or the store / first column) stay in place
+     when the table is scrolled sideways.
+   ========================================= */
+const TBL_HIDE_KEY='viewx-mm-hidden-cols';
+let tblHidden={};try{tblHidden=JSON.parse(localStorage.getItem(TBL_HIDE_KEY)||'{}')||{}}catch(e){}
+const cellNum=v=>{if(typeof v==='number')return v;const t=String(v??'').replace(/<[^>]*>/g,'').replace(/,/g,'').trim();const m=t.match(/^[+-]?\d+(\.\d+)?/);return m?parseFloat(m[0]):NaN};
+const blankCell=v=>v===''||v==null||/^[-—–]?$/.test(String(v).trim());
+// heading text without the sort arrow; month names of the 2-month popup become [A] / [B] so a hidden column stays hidden for other months
+function thKey(th){
+  let t=[...th.childNodes].filter(n=>!(n.classList&&n.classList.contains('ts-ico'))).map(n=>n.textContent).join('').replace(/\s+/g,' ').trim();
+  if(M.la&&th.closest('#cmpModal'))t=t.split(M.la).join('[A]').split(M.lb).join('[B]');
+  return t;
+}
+function paintRows(tb){
+  const T=tb._t;if(!T)return;
+  const {rows,cols,cells,clss,limit}=T,s=tb._sort;
+  const order=rows.map((_,i)=>i);
+  if(s&&s.j<cols.length){
+    const j=s.j,d=s.dir;let numeric=true;
+    for(let i=0;i<order.length;i++){const x=cells[i][j];if(!blankCell(x)&&isNaN(cellNum(x))){numeric=false;break}}
+    order.sort((a,b)=>{const x=cells[a][j],y=cells[b][j];
+      if(numeric){const p=cellNum(x),q=cellNum(y);return d*((isNaN(p)?-Infinity:p)-(isNaN(q)?-Infinity:q))||a-b}
+      return d*String(x??'').replace(/<[^>]*>/g,'').localeCompare(String(y??'').replace(/<[^>]*>/g,''),undefined,{numeric:true,sensitivity:'base'})||a-b});
+  }
+  const n=Math.min(order.length,limit);let html='';
+  for(let o=0;o<n;o++){const i=order[o];html+=tb._drill?`<tr data-i="${i}" title="Click for Area Manager and Store details">`:'<tr>';
+    for(let j=0;j<cols.length;j++){const c=cols[j],v=cells[i][j];html+=`<td class="${c.num?'num':''} ${clss[i][j]}">${c.html?c.html(v):esc(v??'')}</td>`}
+    html+='</tr>'}
+  tb.innerHTML=html||`<tr><td colspan="${cols.length}" class="empty">No matching records</td></tr>`;
+}
+function tblEnhance(tb){
+  const table=tb.closest('table');if(!table)return;
+  table.dataset.t=tb.id;
+  if(table._tbl)return;table._tbl=1;
+  // sorting: one listener per table (headings may be rebuilt)
+  table.addEventListener('click',e=>{
+    const tb=document.getElementById(table.dataset.t);const th=e.target.closest('th');if(!tb||!th||!table.tHead||!table.tHead.contains(th)||!tb._t)return;
+    e.stopPropagation();
+    const j=[...th.parentElement.children].indexOf(th),c=tb._t.cols[j];if(!c)return;
+    const first=c.num?-1:1,s=tb._sort;
+    tb._sort=!s||s.j!==j?{j,dir:first}:s.dir===first?{j,dir:-first}:null;
+    paintRows(tb);tblDecorate(tb);
+  },true);
+  // Columns button above the table
+  const anchor=table.closest('.table-wrap')||table;
+  const bar=document.createElement('div');bar.className='tbl-tools';bar.setAttribute('data-html2canvas-ignore','true');
+  bar.innerHTML='<button type="button" class="tbl-colbtn" title="Show or hide columns">☰ Columns</button><div class="tbl-colmenu hidden"></div>';
+  anchor.parentElement.insertBefore(bar,anchor);
+  const btn=bar.firstElementChild,menu=bar.lastElementChild;
+  btn.addEventListener('click',e=>{
+    e.stopPropagation();const tb=document.getElementById(table.dataset.t);if(!tb)return;const show=menu.classList.contains('hidden');
+    document.querySelectorAll('.tbl-colmenu').forEach(m=>m.classList.add('hidden'));if(!show||!table.tHead||!table.tHead.rows[0])return;
+    const hid=new Set(tblHidden[tb.id]||[]);
+    menu.innerHTML=[...table.tHead.rows[0].cells].map((th,j)=>{const h=thKey(th);return `<label><input type="checkbox" data-h="${esc(h)}"${hid.has(h)?'':' checked'}${j===0?' disabled':''}><span>${esc(h.replace('[A]',M.la||'A').replace('[B]',M.lb||'B'))}</span></label>`}).join('')
+      +'<div class="tbl-colacts"><button type="button" data-a="all">Show all</button></div>';
+    menu.classList.remove('hidden');
+  });
+  menu.addEventListener('click',e=>{e.stopPropagation();const tb=document.getElementById(table.dataset.t);if(tb&&e.target.dataset&&e.target.dataset.a==='all'){delete tblHidden[tb.id];saveTblHidden();menu.querySelectorAll('input').forEach(i=>{i.checked=true});tblDecorate(tb)}});
+  menu.addEventListener('change',e=>{const cb=e.target,tb=document.getElementById(table.dataset.t);if(!tb||!cb.dataset||cb.dataset.h===undefined)return;
+    const hid=new Set(tblHidden[tb.id]||[]);cb.checked?hid.delete(cb.dataset.h):hid.add(cb.dataset.h);
+    if(hid.size)tblHidden[tb.id]=[...hid];else delete tblHidden[tb.id];saveTblHidden();tblDecorate(tb)});
+}
+function saveTblHidden(){try{localStorage.setItem(TBL_HIDE_KEY,JSON.stringify(tblHidden))}catch(e){}}
+document.addEventListener('click',()=>document.querySelectorAll('.tbl-colmenu').forEach(m=>m.classList.add('hidden')));
+function tblStyle(id){let s=document.getElementById(id);if(!s){s=document.createElement('style');s.id=id;document.head.appendChild(s)}return s}
+// sort arrows + hidden columns, then the frozen columns
+function tblDecorate(tb){
+  const table=tb.closest('table');if(!table||!table.tHead||!table.tHead.rows[0])return;
+  const ths=[...table.tHead.rows[0].cells],hid=new Set(tblHidden[tb.id]||[]),sel=`table[data-t="${tb.id}"]`;let css='';
+  ths.forEach((th,j)=>{
+    let ic=th.querySelector('.ts-ico');if(!ic){ic=document.createElement('span');ic.className='ts-ico';th.appendChild(ic)}
+    ic.textContent=tb._sort&&tb._sort.j===j?(tb._sort.dir>0?'▲':'▼'):'';
+    th.classList.toggle('ts-on',!!(tb._sort&&tb._sort.j===j));
+    if(j>0&&hid.has(thKey(th)))css+=`${sel} tr>*:nth-child(${j+1}){display:none}`;
+  });
+  tblStyle('tblhide-'+tb.id).textContent=css;
+  tblFreeze(tb);
+}
+function tblFreeze(tb){
+  const table=tb.closest('table'),st=tblStyle('tblfz-'+tb.id);
+  if(!table||!table.tHead||!table.tHead.rows[0]||!table.offsetParent){st.textContent='';return}
+  const ths=[...table.tHead.rows[0].cells],keys=ths.map(thKey);
+  let k=keys.findIndex(h=>/product|long name/i.test(h));
+  if(k<0)k=keys.findIndex(h=>/^store( name)?$/i.test(h));
+  if(k<0)k=0;
+  const sel=`table[data-t="${tb.id}"]`;let left=0,css='',last=-1;
+  for(let j=0;j<=k;j++){const w=ths[j].offsetWidth;if(!w)continue;const n=j+1;
+    css+=`${sel} tr>*:nth-child(${n}){position:sticky;left:${left}px;z-index:2}`
+      +`${sel} tbody td:nth-child(${n}){background:#fff}${sel} tbody tr:hover td:nth-child(${n}){background:#f1f6ff}`
+      +`${sel} thead th:nth-child(${n}){z-index:4;background:#f6f8fb}${sel} tfoot td:nth-child(${n}){z-index:4;background:#eaf1fc}`;
+    left+=w;last=n}
+  if(last>0)css+=`${sel} tr>*:nth-child(${last}){box-shadow:6px 0 6px -5px rgba(20,36,59,.22)}`;
+  st.textContent=css;
+}
+function refreezeTables(){document.querySelectorAll('table[data-t]').forEach(t=>{const tb=document.getElementById(t.dataset.t);if(tb)tblFreeze(tb)})}
 
 /* =========================================
    DRILL-DOWN POPUP — Area Manager and Store breakdown of one table entry
@@ -1857,6 +2028,8 @@ function drillTable(id,title,cols,list){
   h+='</tbody>';
   if(list.length)h+='<tfoot><tr>'+cols.map((c,j)=>`<td class="${isNum(c)?'num':''}">${j===0?'Total':isNum(c)?show(c,c.f(tot)):''}</td>`).join('')+'</tr></tfoot>';
   $(id).innerHTML=h;
+  const dtb=$(id).tBodies[0]; // sorting, Columns and frozen columns for the popup tables too
+  if(dtb&&list.length){dtb.id=id+'Body';dtb._t={rows:list,cols:cols.map(c=>({num:isNum(c),html:x=>x})),cells:list.map(r=>cols.map(c=>show(c,c.f(r)))),clss:list.map(r=>cols.map(c=>c.t==='c'?chgCls(c.f(r)):'')),limit:1e9};tblEnhance(dtb);setTimeout(()=>tblDecorate(dtb),0)}
   const aoa=[cols.map(c=>c.h),...list.map(r=>cols.map(c=>raw(c,c.f(r))))];
   if(list.length)aoa.push(cols.map((c,j)=>j===0?'Total':isNum(c)?raw(c,c.f(tot)):''));
   return {title,aoa};
@@ -2230,9 +2403,47 @@ function mKpi(i,a,b,change){
   $('mK'+i).textContent=`${a} → ${b}`;
   $('mK'+i+'h').textContent=`${M.la} → ${M.lb}`+(change===null||change===undefined?'':` • ${change>0?'+':''}${pct(change)}`);
 }
+/* MONTH-vs-MONTH BARS: rounded gradient bars side by side, a small ▲/▼ change % tag on the Month B bar,
+   and both months plus the change in the tooltip. */
+const cmpShort=v=>{const a=Math.abs(v);return a>=1e6?(v/1e6).toFixed(1).replace(/\.0$/,'')+'M':a>=1e3?(v/1e3).toFixed(1).replace(/\.0$/,'')+'K':fmt(v)};
+function cmpGrad(c,solid,soft,horizontal){
+  const ch=c.chart,a=ch.chartArea;if(!a)return solid;
+  const g=horizontal?ch.ctx.createLinearGradient(a.left,0,a.right,0):ch.ctx.createLinearGradient(0,a.bottom,0,a.top);
+  g.addColorStop(0,soft);g.addColorStop(1,solid);return g;
+}
+const cmpChg=(c)=>{const s=c.chart.canvas._cmp;if(!s)return null;const a=s.A[c.dataIndex],b=s.B[c.dataIndex];return a?(b-a)/a*100:null};
 function mBars(id,list,n,horizontal,key='s'){
-  const top=list.slice(0,n);
-  setChart(id,'bar',top.map(x=>x.name),[{label:M.la,data:top.map(x=>x['a'+key]),backgroundColor:CA},{label:M.lb,data:top.map(x=>x['b'+key]),backgroundColor:CB}],horizontal);
+  const canvas=$(id);if(!canvas||typeof Chart==='undefined')return;
+  const top=list.slice(0,n),labels=top.map(x=>x.name),A=top.map(x=>x['a'+key]),B=top.map(x=>x['b'+key]);
+  const val=v=>key==='q'?fmt(v):money(v),thick=horizontal?12:26;
+  const ds=[
+    {label:M.laFull||M.la,data:A,backgroundColor:c=>cmpGrad(c,CA,'rgba(50,103,233,.45)',horizontal),hoverBackgroundColor:CA,borderRadius:7,borderSkipped:false,maxBarThickness:thick,datalabels:{display:false}},
+    {label:M.lbFull||M.lb,data:B,backgroundColor:c=>cmpGrad(c,CB,'rgba(24,168,139,.45)',horizontal),hoverBackgroundColor:CB,borderRadius:7,borderSkipped:false,maxBarThickness:thick}];
+  canvas._cmp={A,B}; // both months' values, for the change tags and tooltip
+  if(horizontal){const h=Math.max(260,top.length*30+60),box=canvas.parentElement;box.style.height=h+'px';box.style.setProperty('--h',h+'px')} // room for every bar pair
+  const ex=charts[id];
+  if(ex){ex.data.labels=labels;ex.data.datasets=ds;ex.update('none');return}
+  const cut=s=>{s=String(s);return s.length>24?s.slice(0,23)+'…':s};
+  const ch=charts[id]=new Chart(canvas,{type:'bar',data:{labels,datasets:ds},plugins:[ChartDataLabels],options:{
+    responsive:true,maintainAspectRatio:false,animation:{duration:400},indexAxis:horizontal?'y':'x',
+    layout:{padding:{top:horizontal?2:24,right:horizontal?58:6,left:2}},
+    interaction:{mode:'index',intersect:false},
+    datasets:{bar:{categoryPercentage:.74,barPercentage:.88}},
+    plugins:{
+      legend:{position:'top',align:'end',labels:{usePointStyle:true,pointStyle:'rectRounded',boxWidth:10,boxHeight:10,padding:14,color:'#52637a',font:{size:11,weight:'600'}}},
+      tooltip:{backgroundColor:'rgba(15,23,42,.94)',padding:11,cornerRadius:10,usePointStyle:true,boxPadding:5,titleFont:{size:12,weight:'700'},bodyFont:{size:12},footerFont:{size:12,weight:'700'},
+        callbacks:{label:c=>` ${c.dataset.label}: ${val(c.parsed[horizontal?'x':'y'])}`,
+          footer:items=>{const d=items.length&&cmpChg(items[0]);return d===null||d===false||d===undefined?'':`Change: ${d>0?'+':''}${d.toFixed(1)}%`}}},
+      datalabels:{display:c=>cmpChg(c)!==null,anchor:'end',align:horizontal?'right':'top',offset:3,clamp:true,
+        formatter:(v,c)=>{const d=cmpChg(c);return `${d>=0?'▲':'▼'} ${Math.abs(d).toFixed(1)}%`},
+        color:c=>cmpChg(c)>=0?'#0f7a64':'#c2410c',
+        backgroundColor:c=>cmpChg(c)>=0?'rgba(24,168,139,.13)':'rgba(240,120,120,.16)',
+        borderRadius:999,padding:{top:2,bottom:2,left:6,right:6},font:{size:9.5,weight:'700'}}
+    },
+    scales:{
+      [horizontal?'y':'x']:{grid:{display:false},border:{display:false},ticks:{color:'#52637a',font:{size:10,weight:'500'},autoSkip:!horizontal,maxRotation:horizontal?0:35,callback:function(v){return cut(this.getLabelForValue(v))}}},
+      [horizontal?'x':'y']:{beginAtZero:true,grace:'10%',border:{display:false},grid:{color:'rgba(148,163,184,.18)',drawTicks:false},ticks:{color:'#8a97a9',font:{size:10},padding:6,callback:v=>cmpShort(v)}}
+    }}});
 }
 // two doughnuts side by side (one per month), same slice order and colours in both
 function mDonuts(id,list,n,key='s',asShare=false){
@@ -2355,6 +2566,7 @@ function renderMonthCompare(){
   for(let i=0;i<rawRows.length;i++){const r=rawRows[i];if(!r.__y||!pred(r))continue;if(dateOK(r,fa))A.push(r);if(dateOK(r,fb))B.push(r)}
   M.la=ymLabel(a,true);M.lb=ymLabel(b,true);M.laFull=ymLabel(a);M.lbFull=ymLabel(b);M.A=A;M.B=B;
   MODAL[modalView].fill(A,B,aggregate(A),aggregate(B));
+  fitChartTables();
 }
 $('topCmp').addEventListener('click',openMonthCompare);
 $('cmpClose').addEventListener('click',closeMonthCompare);
@@ -2381,6 +2593,9 @@ function pdfBlocks(root){
     for(const c of el.children){
       if(c.matches('.filters,.toolbar,.compare-controls,.cmp-head,.note,.section-title,.footer,script,[data-html2canvas-ignore]'))continue;
       if(getComputedStyle(c).display==='none')continue;
+      // chart beside a table: the chart, then the table at full page width (long tables then continue cleanly on the next pages)
+      if(c.matches('.chart-with-table')&&c.querySelector('.chart-col')&&c.querySelector('.table-col')){
+        out.push({el:c.querySelector('.chart-col'),wf:c.classList.contains('stacked')?1:.72});out.push(c.querySelector('.table-col'));continue}
       if(c.matches('.kpis,.panel,.charts'))out.push(c);
       else if(c.matches('.table-panel')){if(c.querySelector('.panel,.kpis,.table-panel'))walk(c);else out.push(c)}
       else walk(c);
@@ -2417,6 +2632,7 @@ async function pdfCapture(el){
   const canvas=await html2canvas(el,{scale:Math.max(1,Math.min(2,15000/Math.max(1,estimate),12000/Math.max(1,fullW))),backgroundColor:'#f4f7fb',logging:false,
     windowWidth:Math.max(window.innerWidth,fullW+80),onclone:(doc,c)=>{
     if(extra>0){c.style.width=fullW+'px';c.style.maxWidth='none'}
+    doc.querySelectorAll('style[id^="tblfz-"]').forEach(s=>s.remove()); // no frozen columns in the printed copy
     c.querySelectorAll('.table-col').forEach(x=>{x.style.height='auto'});
     c.querySelectorAll('.table-wrap').forEach(w=>{w.style.setProperty('max-height','none','important');w.style.overflow='visible';w.style.flex='none'});
     c.querySelectorAll('tfoot td,th').forEach(x=>{x.style.position='static'}); // Total row and headings in normal flow for the picture
@@ -2435,7 +2651,7 @@ async function exportPDF(root,title,btn,scopes,note){
     await Promise.all(PDF_LIBS.map(loadScript));
     closeAllDropdowns();
     const blocks=pdfBlocks(root);if(!blocks.length)throw Error('nothing to export in this view');
-    header=pdfHeader(title,scopes,blocks[0].getBoundingClientRect().width,note);
+    header=pdfHeader(title,scopes,Math.max(...blocks.map(b=>(b.el||b).getBoundingClientRect().width)),note);
     const pdf=new window.jspdf.jsPDF({orientation:'landscape',unit:'pt',format:'a4'});
     const pw=pdf.internal.pageSize.getWidth(),ph=pdf.internal.pageSize.getHeight(),margin=22,gap=10,iw=pw-2*margin,ih=ph-2*margin;
     const paint=()=>{pdf.setFillColor(244,247,251);pdf.rect(0,0,pw,ph,'F')};
@@ -2445,10 +2661,10 @@ async function exportPDF(root,title,btn,scopes,note){
     const all=[header,...blocks];
     for(let n=0;n<all.length;n++){
       btn.textContent=`Preparing PDF… ${n+1}/${all.length}`;
-      const {canvas,info}=await pdfCapture(all[n]);
-      const r=iw/canvas.width,hPt=canvas.height*r;
-      if(hPt<=ph-margin-y)put(canvas);                       // fits on this page
-      else if(hPt<=ih){newPage();put(canvas)}                 // fits on a fresh page
+      const item=all[n],wf=item.wf||1,{canvas,info}=await pdfCapture(item.el||item);
+      const r=iw/canvas.width,hPt=canvas.height*r*wf;
+      if(hPt<=ph-margin-y)put(canvas,iw*wf);                  // fits on this page
+      else if(hPt<=ih){newPage();put(canvas,iw*wf)}           // fits on a fresh page
       else if(!info.rows.length){newPage();put(canvas,iw*ih/hPt)} // tall card with no table: shrink to one page
       else{                                                   // long table: split between rows only
         const s=canvas.width/(info.cssWidth||canvas.width),breaks=info.rows.map(v=>Math.round(v*s));
