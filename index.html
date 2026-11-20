@@ -2741,4 +2741,63 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
 </script><script>!function(){if(window.self===window.top)return;var P=["https://drcafe-bi.com","https://www.drcafe-bi.com"];document.addEventListener("keydown",function(e){if(e.altKey&&!e.ctrlKey&&!e.metaKey&&("KeyS"===e.code||"s"===e.key||"S"===e.key)){e.preventDefault();P.forEach(function(o){try{window.parent.postMessage({type:"viewx-toggle-menumix"},o)}catch(x){}})}},!0)}();</script>
 <style>.frame-ctrl{display:flex;align-items:center;gap:6px;margin-left:auto;flex-shrink:0}.userbox:not(.hidden)+.frame-ctrl{margin-left:0}.frame-ctrl .btn{width:34px;padding:0;font-size:15px;line-height:1}</style>
 <script>!function(){if(window.self===window.top)return;var P=["https://drcafe-bi.com","https://www.drcafe-bi.com"],nav=document.getElementById("topnav");if(!nav)return;function send(t){P.forEach(function(o){try{window.parent.postMessage({type:t},o)}catch(e){}})}var w=document.createElement("div");w.className="frame-ctrl";w.innerHTML='<button type="button" class="btn sm secondary" id="frameMin" title="Minimize (Alt+S)" aria-label="Minimize Menu Mix">&#8211;</button><button type="button" class="btn sm secondary" id="frameClose" title="Close Menu Mix" aria-label="Close Menu Mix">&#10005;</button>';nav.appendChild(w);w.querySelector("#frameMin").addEventListener("click",function(){send("viewx-minimize-menumix")});w.querySelector("#frameClose").addEventListener("click",function(){send("viewx-close-menumix")});send("viewx-frame-controls")}();</script>
+<script>
+/* SALES <-> MENU MIX LINK (v7.5)
+   The Sales dashboard (drcafe-bi.com) asks for one store's item sales in two periods, to explain a store's sales change.
+   Request : {type:'viewx-item-compare', id, store, a:{from:'YYYY-MM-DD',to}, b:{from,to}}
+   Replies : {type:'viewx-item-compare-ack', id}  straight away, then
+             {type:'viewx-item-compare-result', id, ok, error, storeName, a:{from,to,sales,qty}, b:{...}, items:[...]}
+   Period A is cut at the last day this store has Menu Mix data, and period B is cut to the same number of days,
+   so a part month is compared with the same days of the other month. Only this person's own stores are in rawRows. */
+(function(){
+  if(window.self===window.top)return;
+  var P=['https://drcafe-bi.com','https://www.drcafe-bi.com'];
+  function code(v){var s=String(v==null?'':v).trim();if(/^\d+\.0+$/.test(s))s=s.replace(/\.0+$/,'');return s.replace(/^0+(?=\d)/,'')}
+  function ymOf(d){return d.slice(0,7)}
+  function months(from,to){var out=[],y=+from.slice(0,4),m=+from.slice(5,7),ey=+to.slice(0,4),em=+to.slice(5,7);
+    while(y<ey||(y===ey&&m<=em)){out.push(y+'-'+String(m).padStart(2,'0'));if(++m>12){m=1;y++}}return out}
+  function addDays(d,n){var x=new Date(d+'T00:00:00Z');x.setUTCDate(x.getUTCDate()+n);return x.toISOString().slice(0,10)}
+  function dayDiff(a,b){return Math.round((Date.parse(b+'T00:00:00Z')-Date.parse(a+'T00:00:00Z'))/864e5)}
+  function okDate(d){return typeof d==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(d)}
+  function waitForData(ms){
+    return new Promise(function(res,rej){var t0=Date.now();(function chk(){
+      if(rawRows.length)return res();
+      if(AVAIL.length===0&&typeof ME!=='undefined'&&ME&&Date.now()-t0>4000)return rej(Error('there is no Menu Mix data for your stores'));
+      if(Date.now()-t0>ms)return rej(Error('Menu Mix did not finish loading in time — open Menu Mix once, then try again'));
+      setTimeout(chk,400)})()})}
+  function compare(store,a,b){
+    var sc=code(store),mine=[],maxA='',name='';
+    for(var i=0;i<rawRows.length;i++){var r=rawRows[i];if(code(r.__storeId)!==sc)continue;mine.push(r);
+      if(!name)name=r.__store;if(r.__date>=a.from&&r.__date<=a.to&&r.__date>maxA)maxA=r.__date}
+    // line period B up with the days that period A really has data for
+    if(maxA&&maxA<a.to){var bTo=addDays(b.from,dayDiff(a.from,maxA));a={from:a.from,to:maxA};if(bTo<b.to)b={from:b.from,to:bTo}}
+    var m=new Map(),A={from:a.from,to:a.to,sales:0,qty:0},B={from:b.from,to:b.to,sales:0,qty:0};
+    for(var j=0;j<mine.length;j++){var x=mine[j],d=x.__date,k=d>=a.from&&d<=a.to?'a':d>=b.from&&d<=b.to?'b':'';if(!k)continue;
+      var it=m.get(x.__item);if(!it)m.set(x.__item,it={item:x.__item,name:x.__product,cat:x.__category,sub:x.__sub,qa:0,qb:0,sa:0,sb:0});
+      var q=+x.__qty||0,s=+x.__sales||0;
+      if(k==='a'){it.qa+=q;it.sa+=s;A.qty+=q;A.sales+=s}else{it.qb+=q;it.sb+=s;B.qty+=q;B.sales+=s}}
+    var items=[];m.forEach(function(v){if(v.sa||v.sb||v.qa||v.qb)items.push(v)});
+    return {storeName:name,found:mine.length>0,a:A,b:B,items:items};
+  }
+  window.__mmItemCompare=compare; // for testing in the browser console
+  window.addEventListener('message',function(e){
+    if(e.source!==window.parent||P.indexOf(e.origin)<0)return;
+    var q=e.data||{};if(q.type!=='viewx-item-compare')return;
+    var reply=function(o){o.id=q.id;try{window.parent.postMessage(o,e.origin)}catch(err){}};
+    reply({type:'viewx-item-compare-ack'});
+    (async function(){
+      try{
+        if(!q.store||!q.a||!q.b||![q.a.from,q.a.to,q.b.from,q.b.to].every(okDate))throw Error('bad request');
+        await waitForData(120000);
+        var need=months(q.a.from,q.a.to).concat(months(q.b.from,q.b.to));
+        var missing=need.filter(function(ym){return AVAIL.indexOf(ym)<0});
+        try{await ensureMonths(need)}catch(err){}
+        var r=compare(q.store,{from:q.a.from,to:q.a.to},{from:q.b.from,to:q.b.to});
+        reply({type:'viewx-item-compare-result',ok:true,missing:missing,storeName:r.storeName,found:r.found,a:r.a,b:r.b,items:r.items});
+      }catch(err){reply({type:'viewx-item-compare-result',ok:false,error:String(err&&err.message||err)})}
+    })();
+  });
+})();
+</script>
+
 </body></html>
