@@ -2780,6 +2780,35 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
     return {storeName:name,found:mine.length>0,a:A,b:B,items:items};
   }
   window.__mmItemCompare=compare; // for testing in the browser console
+  /* v7.6 WASTE & MIX: daily sold qty and sales of the asked items, every store this person can see.
+     Request : {type:'viewx-item-daily', id, from, to, items:['721101',...]}
+     Reply   : {type:'viewx-item-daily-result', id, ok, stores:{id:name}, rows:[[store,item,'YYYY-MM-DD',qty,sales],...], days:{store:[dates with any sale]}} */
+  function daily(from,to,items){
+    var want=new Set((items||[]).map(String)),agg=new Map(),stores={},days={};
+    for(var i=0;i<rawRows.length;i++){var r=rawRows[i],d=r.__date;if(d<from||d>to)continue;
+      var s=code(r.__storeId);stores[s]||(stores[s]=r.__store);(days[s]||(days[s]=new Set())).add(d);
+      if(!want.has(String(r.__item)))continue;
+      var k=s+'\u0001'+r.__item+'\u0001'+d,x=agg.get(k);if(!x)agg.set(k,x=[s,String(r.__item),d,0,0]);x[3]+=+r.__qty||0;x[4]+=+r.__sales||0}
+    var dd={};Object.keys(days).forEach(function(s){dd[s]=[...days[s]].sort()});
+    return {stores:stores,rows:[...agg.values()],days:dd};
+  }
+  window.__mmItemDaily=daily;
+  window.addEventListener('message',function(e){
+    if(e.source!==window.parent||P.indexOf(e.origin)<0)return;
+    var q=e.data||{};if(q.type!=='viewx-item-daily')return;
+    var reply=function(o){o.id=q.id;try{window.parent.postMessage(o,e.origin)}catch(err){}};
+    reply({type:'viewx-item-compare-ack'});
+    (async function(){
+      try{
+        if(!okDate(q.from)||!okDate(q.to)||!Array.isArray(q.items))throw Error('bad request');
+        await waitForData(120000);
+        try{await ensureMonths(months(q.from,q.to))}catch(err){}
+        var r=daily(q.from,q.to,q.items);
+        reply({type:'viewx-item-daily-result',ok:true,stores:r.stores,rows:r.rows,days:r.days,
+          missing:months(q.from,q.to).filter(function(ym){return AVAIL.indexOf(ym)<0})});
+      }catch(err){reply({type:'viewx-item-daily-result',ok:false,error:String(err&&err.message||err)})}
+    })();
+  });
   window.addEventListener('message',function(e){
     if(e.source!==window.parent||P.indexOf(e.origin)<0)return;
     var q=e.data||{};if(q.type!=='viewx-item-compare')return;
