@@ -2783,14 +2783,17 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
   /* v7.6 WASTE & MIX: daily sold qty and sales of the asked items, every store this person can see.
      Request : {type:'viewx-item-daily', id, from, to, items:['721101',...]}
      Reply   : {type:'viewx-item-daily-result', id, ok, stores:{id:name}, rows:[[store,item,'YYYY-MM-DD',qty,sales],...], days:{store:[dates with any sale]}} */
+  // v7.8: food sales (categories Food and Grab & Go) by store and day: food[store][date]=sales
+  var FOOD_CATS={'food':1,'grab & go':1};
   function daily(from,to,items){
-    var want=new Set((items||[]).map(String)),agg=new Map(),stores={},days={};
+    var want=new Set((items||[]).map(String)),agg=new Map(),stores={},days={},food={};
     for(var i=0;i<rawRows.length;i++){var r=rawRows[i],d=r.__date;if(d<from||d>to)continue;
       var s=code(r.__storeId);stores[s]||(stores[s]=r.__store);(days[s]||(days[s]=new Set())).add(d);
+      if(FOOD_CATS[String(r.__category||'').trim().toLowerCase()]){var fs=food[s]||(food[s]={});fs[d]=(fs[d]||0)+(+r.__sales||0)}
       if(!want.has(String(r.__item)))continue;
       var k=s+'\u0001'+r.__item+'\u0001'+d,x=agg.get(k);if(!x)agg.set(k,x=[s,String(r.__item),d,0,0]);x[3]+=+r.__qty||0;x[4]+=+r.__sales||0}
     var dd={};Object.keys(days).forEach(function(s){dd[s]=[...days[s]].sort()});
-    return {stores:stores,rows:[...agg.values()],days:dd};
+    return {stores:stores,rows:[...agg.values()],days:dd,food:food};
   }
   window.__mmItemDaily=daily;
   window.addEventListener('message',function(e){
@@ -2804,7 +2807,7 @@ if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',
         await waitForData(120000);
         try{await ensureMonths(months(q.from,q.to))}catch(err){}
         var r=daily(q.from,q.to,q.items);
-        reply({type:'viewx-item-daily-result',ok:true,stores:r.stores,rows:r.rows,days:r.days,
+        reply({type:'viewx-item-daily-result',ok:true,stores:r.stores,rows:r.rows,days:r.days,food:r.food,
           missing:months(q.from,q.to).filter(function(ym){return AVAIL.indexOf(ym)<0})});
       }catch(err){reply({type:'viewx-item-daily-result',ok:false,error:String(err&&err.message||err)})}
     })();
